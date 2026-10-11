@@ -1,0 +1,55 @@
+name: Pinned PR evidence (no publication)
+
+on:
+  push:
+    branches: [proof/pr-137233-137250-evidence]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proof-pr-137233-137250
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: PR ${{ matrix.pr }} built CLI evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: '137233'
+            sha: 451a32c657fb1ac7f2fc167294f364c93819decf
+          - pr: '137250'
+            sha: ec516390d97512019f058caafcda267b35d00317
+    steps:
+      - name: Checkout proof harness only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Checkout immutable product source (never execute on host)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: marmar9615-cloud/openclaw
+          ref: ${{ matrix.sha }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Run isolated proof with explicit source identity
+        env:
+          PROOF_PR: ${{ matrix.pr }}
+          PROOF_SHA: ${{ matrix.sha }}
+          PROOF_HARNESS_SHA: ${{ github.sha }}
+        run: node harness/proof.mjs
+      - name: Upload transcripts even when a scenario fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: proof-${{ matrix.pr }}-${{ matrix.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
