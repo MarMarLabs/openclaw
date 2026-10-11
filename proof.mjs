@@ -97,7 +97,21 @@ function containerArgs({ network = 'bridge', caseName, build = false } = {}) {
     ...(build ? ['-v', `${source}:/source`, '-w', '/source'] : ['-w', '/app']),
     ...Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]), image];
 }
-async function docker(label, args, opts = {}, seconds = 120) { return run(label, 'docker', [...containerArgs(opts), ...args], seconds); }
+async function docker(label, args, opts = {}, seconds = 120) {
+  const containerName = `oc-proof-${pr}-${process.pid}-${sequence + 1}`;
+  const options = containerArgs(opts);
+  options.splice(1, 0, '--name', containerName);
+  const result = await run(label, 'docker', [...options, ...args], seconds);
+  // A killed Docker client can leave its container alive. Stop this exact
+  // task-owned container before any host collection of its writable mounts.
+  if (result.code === 124 || result.code === 137 || result.code === null) {
+    const cleanup = await run(`${label}-timeout-cleanup`, 'docker', ['rm', '--force', containerName], 60);
+    if (cleanup.code !== 0 && !cleanup.stderr.includes('No such container')) {
+      throw new Error('Container cleanup unconfirmed; refusing to collect mutable state');
+    }
+  }
+  return result;
+}
 async function requiredDocker(label, args, opts = {}, seconds = 120) {
   const result = await docker(label, args, opts, seconds);
   check(label, result.code === 0, { commandId: result.id });
