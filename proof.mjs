@@ -82,7 +82,7 @@ function containerArgs({ network = 'bridge', caseName, build = false } = {}) {
   const home = caseName ? `/app/cases/${caseName}/home` : '/app/home';
   const env = {
     HOME: home, CI: '1', NO_COLOR: '1', COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
-    PATH: '/harness:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    PATH: '/harness:/app/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     NODE_OPTIONS: '--max-old-space-size=6144',
     OPENCLAW_DISABLE_BONJOUR: '1', OPENCLAW_NO_ONBOARD: '1',
   };
@@ -316,6 +316,7 @@ try {
   }
   await must('pull-runtime', 'docker', ['pull', image], 300);
   await must('runtime-image-identity', 'docker', ['image', 'inspect', image, '--format', '{{json .RepoDigests}}']);
+  await requiredDocker('existing-repository-tooling', ['bash', '/harness/setup-proof-tools.sh'], {}, 420);
   await requiredDocker('node-version', ['node', '--version']);
   await requiredDocker('npm-version', ['npm', '--version']);
   await requiredDocker('stable-registry-metadata', ['npm', 'view', 'openclaw@2026.10.1', 'version', 'gitHead', 'dist', '--json', '--prefer-online']);

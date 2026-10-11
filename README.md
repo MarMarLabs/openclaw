@@ -20,6 +20,10 @@ permissions are contents:read. Capability commands use `--network none`.
 
 The candidate runs the three focused Slack tests and the canonical changed-file
 checks against its beta parent, including lint/types/guards, before packaging.
+The unprivileged container provisions the repository's existing ripgrep 14.1.1
+Linux/X64 musl prerequisite, using the same archive SHA-256 as
+`.github/actions/setup-ripgrep/action.yml`; archive/binary hashes and the version
+are recorded. No project dependency is added and no guard is bypassed.
 The canonical packer produces a core package without adding bundled Slack.
 The repository's prepublish-plugin-registry artifact creator builds the matching
 external Slack package. Its existing in-container registry wrapper verifies the
