@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 const pr = process.env.PROOF_PR;
 const expected = { '137233': '451a32c657fb1ac7f2fc167294f364c93819decf', '137250': 'b682ad79204c585b345e1628746679812df81a00' };
 const releaseBase = 'f283c3c71226c2e1d9ca06b11972f8bdb3969bd8';
-const sourcePatchSha256 = '7091c74245496eb4ea0c4cef5552bebc42b7f1b8ca78eacb31749ed5d25a9111';
+const sourcePatchSha256 = '40103994e51b960236893dbede3245cadbc168172524a9dfee6390e2664c80a9';
 const candidateVersion = pr === '137250' ? '2026.10.5-beta.1' : '2026.9.9';
 if (!expected[pr] || process.env.PROOF_SHA !== expected[pr]) throw new Error('Unrecognized source identity');
 const source = path.resolve('source');
@@ -310,7 +310,7 @@ try {
   if (fs.readFileSync(path.join(out, summary.commands.at(-1).stdoutFile), 'utf8').trim()) throw new Error('Source dirty');
   if (pr === '137250') {
     const parent = await must('candidate-release-parent', 'git', ['-C', source, 'rev-parse', 'HEAD^']);
-    const delta = await must('candidate-exact-pr-delta', 'git', ['-C', source, 'diff', '--binary', 'HEAD^', 'HEAD']);
+    const delta = await must('candidate-exact-pr-delta', 'git', ['-C', source, 'diff', '--binary', '--full-index', 'HEAD^', 'HEAD']);
     check('candidate is beta release plus exact reviewed PR delta', parent.stdout.trim() === releaseBase && sha256(Buffer.from(delta.stdout)) === sourcePatchSha256, { parent: parent.stdout.trim(), patchSha256: sha256(Buffer.from(delta.stdout)) });
     if (parent.stdout.trim() !== releaseBase || sha256(Buffer.from(delta.stdout)) !== sourcePatchSha256) throw new Error('Candidate base/delta differs');
   }
