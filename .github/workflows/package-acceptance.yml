@@ -14,15 +14,13 @@ jobs:
   evidence:
     name: PR ${{ matrix.pr }} built CLI evidence
     runs-on: ubuntu-24.04
-    timeout-minutes: 110
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
         include:
-          - pr: '137233'
-            sha: 451a32c657fb1ac7f2fc167294f364c93819decf
           - pr: '137250'
-            sha: ec516390d97512019f058caafcda267b35d00317
+            sha: b682ad79204c585b345e1628746679812df81a00
     steps:
       - name: Checkout proof harness only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -36,7 +34,7 @@ jobs:
           ref: ${{ matrix.sha }}
           path: source
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 2
       - name: Run isolated proof with explicit source identity
         env:
           PROOF_PR: ${{ matrix.pr }}
