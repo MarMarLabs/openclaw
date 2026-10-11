@@ -1,8 +1,6 @@
 name: Pinned PR evidence (no publication)
 
 on:
-  push:
-    branches: [proof/pr-137233-137250-evidence]
   workflow_dispatch:
 
 permissions:

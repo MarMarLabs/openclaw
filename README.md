@@ -2,7 +2,9 @@
 
 This orphan branch contains only a disposable evidence harness. It is not a PR,
 release, production-code change, or request to publish comments. PR branches are
-never mutated. Push to this one branch runs two bounded, independent jobs.
+never mutated. An explicit dispatch on this branch runs two bounded, independent jobs.
+The branch-local definition uses the fork's already registered Package Acceptance
+workflow path; neither the default branch nor its workflow definition is changed.
 
 Product source is pinned to the full PR head commits in the workflow and harness.
 Every contributor-controlled build, package, install, and CLI command executes in
