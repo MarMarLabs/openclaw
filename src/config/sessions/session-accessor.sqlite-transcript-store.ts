@@ -13,7 +13,6 @@ import {
 import { redactSecrets } from "../../logging/redact.js";
 import {
   deferOpenClawAgentPostCommitPublication,
-  openOpenClawAgentDatabase,
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
 import { advanceCliHistoryBoundaryInTransaction } from "./session-accessor.sqlite-cli-history-boundary.js";
@@ -30,12 +29,7 @@ import {
   readTranscriptEventMessage,
   readTranscriptIdentityByEventId,
 } from "./session-accessor.sqlite-read.js";
-import {
-  getSessionKysely,
-  resolveSqliteTranscriptScope,
-  toDatabaseOptions,
-  type ResolvedTranscriptScope,
-} from "./session-accessor.sqlite-scope.js";
+import { getSessionKysely, type ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import {
   createTranscriptIdentityInserter,
   readIdempotencyKeyOwner,
@@ -54,9 +48,7 @@ import {
   rotateTranscriptGenerationInTransaction,
   touchTranscriptMutationInTransaction,
 } from "./session-accessor.sqlite-transcript-state.js";
-import type { SessionTranscriptRuntimeScope } from "./session-accessor.types.js";
 import { readSessionActorTransactionState } from "./session-actor-transaction.js";
-import { readHotSessionTranscriptSnapshot } from "./session-cold-storage-read.js";
 import {
   createTranscriptIndexAppenderInTransaction,
   deleteSessionTranscriptIndexInTransaction,
@@ -552,9 +544,9 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
     seq: number;
   }[],
   options: { legacyTextStorage?: boolean } = {},
-): void {
+): string | undefined {
   if (rows.length === 0) {
-    return;
+    return undefined;
   }
   const rewrites = rows.map((row) => {
     const eventJson = JSON.stringify(canonicalizeTranscriptEventMedia(row.event));
@@ -591,6 +583,15 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
                   event_zstd: parameter((row) => row.payload!.event_zstd),
                   event_utf8_bytes: parameter((row) => row.payload!.event_utf8_bytes),
                   navigation_json: parameter((row) => row.payload!.navigation_json),
+                  navigation_type: parameter((row) => row.payload!.navigation_type),
+                  navigation_custom_type: parameter((row) => row.payload!.navigation_custom_type),
+                  navigation_display: parameter((row) => row.payload!.navigation_display),
+                  message_role: parameter((row) => row.payload!.message_role),
+                  navigation_last_type: parameter((row) => row.payload!.navigation_last_type),
+                  navigation_last_custom_type: parameter(
+                    (row) => row.payload!.navigation_last_custom_type,
+                  ),
+                  navigation_valid: parameter((row) => row.payload!.navigation_valid),
                 },
           )
           .where("session_id", "=", resolved.sessionId)
@@ -615,11 +616,11 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
       }
       // Steering correlation changes no admitted input. Keep its running turn's fence,
       // while every other payload rewrite still invalidates admissions and cursors.
-      if (
-        !rewrites.every((row) => isSteerConfirmationRewrite(row.expectedEventJson, row.eventJson))
-      ) {
-        rotateTranscriptGenerationInTransaction(database, resolved.sessionId);
-      }
+      const generation = rewrites.every((row) =>
+        isSteerConfirmationRewrite(row.expectedEventJson, row.eventJson),
+      )
+        ? undefined
+        : rotateTranscriptGenerationInTransaction(database, resolved.sessionId);
       if (!projectionUnchanged) {
         if (options.legacyTextStorage) {
           // Media Doctor rebuilds after the physical storage migration; schema-22 readers
@@ -630,6 +631,7 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
         }
       }
       touchTranscriptMutationInTransaction(database, resolved.sessionId);
+      return generation;
     },
   );
 }
@@ -695,17 +697,6 @@ export function readTranscriptMessageByScopedIdempotencyKey(
   return message
     ? { messageId: readTranscriptEventId(found.event) ?? idempotencyKey, message }
     : undefined;
-}
-
-export function readSessionTranscriptMessageByEventId(
-  scope: SessionTranscriptRuntimeScope,
-  eventId: string,
-): { messageId: string; message: unknown } | undefined {
-  const resolved = resolveSqliteTranscriptScope(scope);
-  const database = openOpenClawAgentDatabase(toDatabaseOptions(resolved));
-  return readHotSessionTranscriptSnapshot(database, resolved.sessionId, "identity", () =>
-    readTranscriptMessageByEventId(database, resolved, eventId),
-  );
 }
 
 export function readTranscriptMessageByEventId(
