@@ -194,51 +194,10 @@ describe("buildFeishuPresentationCard", () => {
     expect(joined).toContain("row119");
   });
 
-  // A quote prefix hides a fence marker from the chunker's scanner, so the cut it makes
-  // leaves an opener in one element and a closer in another. Neither draws a block, and
-  // no limit repairs it, so the projection gives way to the text as authored.
-  it("keeps a quoted table readable when its projection cannot survive the split", () => {
-    const tableMarkdown = [
-      "> | name | detail |",
-      "> | --- | --- |",
-      ...Array.from({ length: 40 }, (_entry, index) => `> | row${index} | d |`),
-      `> | wide | ${"w".repeat(220)} |`,
-    ].join("\n");
-    const presentation = normalizeMessagePresentation({
-      blocks: [{ type: "text", text: tableMarkdown }],
-    });
-    if (!presentation) {
-      throw new Error("expected valid presentation");
-    }
-    const converted = convertMarkdownTables(tableMarkdown, "code");
-    // Guard the fixture: the case only means anything while the authored block fits the
-    // limit, the projection pushes it past, and its markers carry the quote prefix.
-    expect(tableMarkdown.length).toBeLessThanOrEqual(4000);
-    expect(converted.length).toBeGreaterThan(4000);
-    expect(converted).toContain("> ```");
-
-    const elements = buildFeishuPresentationCard({
-      presentation,
-      renderText: (text) => convertMarkdownTables(text, "code"),
-    }).body.elements as { tag: string; content: string }[];
-
-    for (const element of elements) {
-      expect(element.content.length).toBeLessThanOrEqual(4000);
-      // An element opens and closes its own fences or carries none at all.
-      expect((element.content.match(/^(?:&gt; ?)*```/gmu) ?? []).length % 2).toBe(0);
-    }
-    const joined = elements.map((element) => element.content).join("");
-    for (let index = 0; index < 40; index += 1) {
-      expect(joined).toContain(`row${index}`);
-    }
-    expect(joined).toContain("wide");
-  });
-
-  // The conversion hides a quoted table inside a quoted fence, so the card-safe renderer
-  // finds no table left to list and the split hands the authored rows back. A card draws
-  // nothing at all for a table under a quote, so those rows leave the message entirely,
-  // where the projection had only made them unreadable. The shape a cut gives way to has
-  // to be one the card still draws.
+  // A quote prefix hides a fence marker from the chunker's scanner, so a cut through the
+  // projection leaves an opener in one element and a closer in another, and neither draws a
+  // block. The split falls back to the authored rows, and a card draws nothing at all for a
+  // table under a quote, so those rows come back as a list the card still draws.
   it("lists a quoted table whose projection cannot survive the split", () => {
     const tableMarkdown = [
       "> | name | detail |",
@@ -253,12 +212,14 @@ describe("buildFeishuPresentationCard", () => {
       throw new Error("expected valid presentation");
     }
     const converted = convertMarkdownTables(tableMarkdown, "code");
-    // Guard the fixture: the authored rows are a table no card draws, the projection hides
-    // that table inside a fence so nothing is left for the element renderer to list, and the
-    // projection is long enough that the cut it cannot carry is the one that decides.
+    // Guard the fixture: the authored block fits the limit and is a table no card draws, and
+    // the projection pushes it past the limit and hides that table inside a quoted fence, so
+    // nothing is left for the element renderer to list.
+    expect(tableMarkdown.length).toBeLessThanOrEqual(4000);
     expect(hasUndrawableCardTable(tableMarkdown)).toBe(true);
-    expect(hasUndrawableCardTable(converted)).toBe(false);
     expect(converted.length).toBeGreaterThan(4000);
+    expect(converted).toContain("> ```");
+    expect(hasUndrawableCardTable(converted)).toBe(false);
 
     const contents = (
       buildFeishuPresentationCard({
@@ -266,14 +227,17 @@ describe("buildFeishuPresentationCard", () => {
         renderText: (text) => convertMarkdownTables(text, "code"),
         tableMode: "code",
       }).body.elements as { tag: string; content: string }[]
-    )
-      .filter((element) => element.tag === "markdown")
-      .map((element) =>
-        element.content.replace(/&gt;/gu, ">").replace(/&lt;/gu, "<").replace(/&amp;/gu, "&"),
-      );
+    ).map((element) => element.content);
 
     for (const content of contents) {
-      expect(hasUndrawableCardTable(content)).toBe(false);
+      expect(content.length).toBeLessThanOrEqual(4000);
+      // An element opens and closes its own fences or carries none at all.
+      expect((content.match(/^(?:&gt; ?)*```/gmu) ?? []).length % 2).toBe(0);
+      expect(
+        hasUndrawableCardTable(
+          content.replace(/&gt;/gu, ">").replace(/&lt;/gu, "<").replace(/&amp;/gu, "&"),
+        ),
+      ).toBe(false);
     }
     const joined = contents.join("\n");
     expect(joined).toContain("\u2022");
