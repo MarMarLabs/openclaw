@@ -687,6 +687,8 @@ const uiWebkitOwners = [
   "ui/src/components/{web-awesome*,modal-dialog*,tooltip*,menu-*,overlay*,composer-menu*,dropdown-menu*,anchored-overlay*,textarea-token-anchor*,panel-tab-strip*,select-picker*,multi-select*,agent-select*}.{ts,tsx}",
   "ui/src/pages/chat/chat-composer*.{ts,tsx}",
   "ui/src/pages/chat/components/chat-{composer*,picker-overlay*,model-picker*,effort-picker*}.{ts,tsx}",
+  "ui/src/pages/chat/{chat-pane-header,components/chat-pane-header*,components/chat-pane-versions-menu*}.{ts,tsx}",
+  "ui/src/lit/presentation-binding.ts",
   "ui/src/pages/new-session/{composer*,draft-composer*}.{ts,tsx}",
   "ui/src/lib/native-overlay-occlusion.{ts,tsx}",
   "ui/src/styles/{base,layout,components,sidebar-menus,select-picker,multi-select,hub-tabs,*tooltip*,modal*,menu*,session-menu*}.css",
@@ -947,6 +949,25 @@ const runSqliteSessionLifecycle =
   supportsSqliteSessionLifecycleProof &&
   (changedScopeHasSqliteSessionLifecycleImpact ||
     selectedOwnerTest("test/scripts/sqlite-sessions-transcripts-flip-proof.built-cli.e2e.test.ts"));
+const postgresConformancePaths = [
+  "src/infra/database-engine/**",
+  "src/infra/postgres-sync/**",
+  "src/infra/sql-connection.ts",
+  "src/infra/sql-query-compiler.ts",
+  "src/infra/kysely-sync*.ts",
+  "src/infra/sqlite-transaction.ts",
+  "extensions/workboard/**",
+  "src/config/zod-schema.database.ts",
+  "scripts/test-database-conformance*.mjs",
+];
+const runPostgresConformance =
+  existsSync("scripts/test-database-conformance.mjs") &&
+  (eventName === "schedule" ||
+    ((eventName === "pull_request" || releaseGate) &&
+      (changedPaths === null ||
+        changedPaths.some((file) =>
+          postgresConformancePaths.some((pattern) => matchesGlob(file, pattern)),
+        ))));
 const runBuildArtifacts =
   publishedDriverUpdate ||
   (runNodeFull &&
@@ -1199,6 +1220,7 @@ const nodeTestShards = targetNodeTestShards
           "src/agents/sessions/tools/grep.byte-path.test.ts",
           "src/agents/filesystem-tools-output-contract.test.ts",
           "test/scripts/check-database-worker-ratchet.test.ts",
+          "test/scripts/pr-baseline-successor.test.ts",
         ],
         (plan) =>
           ["agentic-agents-support", "agentic-agents-core-runtime"].includes(
@@ -1454,6 +1476,7 @@ const manifest = {
   ),
   run_prompt_snapshots: runNodeFull && !releaseFastLane && changedScopeHasPromptSnapshotImpact,
   run_sqlite_session_lifecycle: runSqliteSessionLifecycle,
+  run_postgres_conformance: runPostgresConformance,
   checks_fast_core_matrix: createMatrix(checksFastCoreTasks),
   run_plugin_contracts_shards: pluginContractShards.length > 0,
   plugin_contracts_matrix: createContractMatrix(pluginContractShards, "contracts-plugins"),
@@ -1704,6 +1727,7 @@ if (hybridHostedEligible) {
     ),
     "check-additional-shard": count(manifest.run_check_additional, hostedAdditionalRows),
     "check-docs": count(manifest.run_check_docs),
+    "postgres-conformance": count(manifest.run_postgres_conformance),
     "skills-python": count(manifest.run_skills_python_job),
     "macos-node": count(manifest.run_macos_node, manifest.macos_node_matrix.include.length),
     "macos-swift": count(manifest.run_macos_swift, 2),
