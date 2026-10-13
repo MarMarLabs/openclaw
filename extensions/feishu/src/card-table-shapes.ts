@@ -48,13 +48,6 @@ export function literalizeFeishuCardTables(
 }
 
 /**
- * A card carries a table as one component, and the card chunker cuts on lines without
- * repeating the header and its delimiter, so every card after the first shows those rows
- * as raw pipes. A table that does not fit one card belongs on the post path, which renders
- * it as a fenced block that survives the cut. One rule, asked at every place that promotes
- * text to a card.
-
-/**
  * Counts the tables in `text` twice: how many the parser finds, and how many of
  * those are eligible to be drawn there.
  *
