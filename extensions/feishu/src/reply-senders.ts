@@ -392,13 +392,28 @@ export function createFeishuReplySenders(ctx: FeishuReplySenderContext) {
     return true;
   };
 
+  const streamingRecoveries = new WeakMap<
+    FeishuReplyDeliveryResult,
+    Map<string, Promise<FeishuReplyDeliveryResult>>
+  >();
+
   const ensureVisibleStreamingDelivery = async (
     result: FeishuReplyDeliveryResult | undefined,
     content: string | undefined,
     infoKind?: string,
   ): Promise<FeishuReplyDeliveryResult | undefined> => {
-    if (result?.visibleReplySent === true || !content?.trim()) {
+    // A visible card whose final write was rejected only shows a stale preview; the
+    // completed answer still has to reach the chat through a static card/message.
+    if (
+      (result?.visibleReplySent === true && result.finalTextAccepted !== false) ||
+      !content?.trim()
+    ) {
       return result;
+    }
+    let recoveries = result && streamingRecoveries.get(result);
+    const pending = recoveries?.get(content);
+    if (pending) {
+      return pending;
     }
     const { header: cardHeader, note: cardNote } = resolveCardChrome();
     const useRecoveryCard =
@@ -415,13 +430,22 @@ export function createFeishuReplySenders(ctx: FeishuReplySenderContext) {
           note: cardNote,
         }),
       );
-    const delivered = await sendChunkedTextReply({
+    const recovery = sendChunkedTextReply({
       text: content,
       useCard: useRecoveryCard,
       infoKind,
+    }).then((delivered) => {
+      rememberStreamingSettlement(content, delivered);
+      return delivered;
     });
-    rememberStreamingSettlement(content, delivered);
-    return delivered;
+    if (result) {
+      if (!recoveries) {
+        recoveries = new Map();
+        streamingRecoveries.set(result, recoveries);
+      }
+      recoveries.set(content, recovery);
+    }
+    return recovery;
   };
 
   return {

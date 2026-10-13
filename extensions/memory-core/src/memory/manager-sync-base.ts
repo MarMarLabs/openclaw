@@ -36,6 +36,7 @@ import {
   type MemoryIndexMeta,
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
+import { MemoryBackgroundRebuildInterruptedError } from "./manager-sync-control.js";
 import { MemorySyncOutcomeLedger } from "./manager-sync-outcome.js";
 import type { MemoryCoreRuntimeHost } from "./runtime-host.js";
 import { buildMemorySourceFilter } from "./source-filter.js";
@@ -97,7 +98,7 @@ export abstract class MemoryManagerSyncBase {
   protected closed = false;
 
   protected assertDatabaseMutationCurrent(database: MemoryIndexDatabase): void {
-    if (this.closed || database.closed || !database.db.isOpen || this.database !== database) {
+    if (this.closed || !database.isOpen || this.database !== database) {
       throw new Error("Memory database owner closed or changed before write admission");
     }
     if (database.readOnly) {
@@ -212,7 +213,7 @@ export abstract class MemoryManagerSyncBase {
       this.sessionBackgroundIndexing && (this.sessionAgentBusy || this.closing || this.closed);
     if (interrupted && this.database !== this.publishedDatabase) {
       // A partial shadow must never replace the published index; retry the rebuild.
-      throw new Error("Memory background rebuild interrupted by foreground activity");
+      throw new MemoryBackgroundRebuildInterruptedError();
     }
     return interrupted;
   }
@@ -600,7 +601,7 @@ export abstract class MemoryManagerSyncBase {
         : undefined;
       const database = this.database;
       const loaded = await database.prepareVector(resolvedPath, () => {
-        if (this.closed || database.closed || !database.db.isOpen) {
+        if (this.closed || !database.isOpen) {
           throw new Error("Memory database owner closed before vector preparation");
         }
       });

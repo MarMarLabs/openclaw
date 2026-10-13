@@ -588,12 +588,15 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           closed = error.result;
           finalizationError = error;
         }
-        result = createFeishuReplyDeliveryResult({
-          results: [closed],
-          visibleReplySent: closed.visibleReplySent,
-          content: closed.content,
-          kind: "card",
-        });
+        result = {
+          ...createFeishuReplyDeliveryResult({
+            results: [closed],
+            visibleReplySent: closed.visibleReplySent,
+            content: closed.content,
+            kind: "card",
+          }),
+          ...(closed.finalTextAccepted === false ? { finalTextAccepted: false } : {}),
+        };
         // A failed removal can leave the card visible, so only a clean discard hands
         // the text to a post instead.
         if (closeNeedsPost && finalizationError === undefined) {

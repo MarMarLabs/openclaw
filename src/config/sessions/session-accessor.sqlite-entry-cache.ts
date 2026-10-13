@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import { toUSVString } from "node:util";
 import { err, ok, type Result } from "@openclaw/normalization-core/result";
 import { readSqliteDatabaseSiblingWriteRevision } from "../../infra/sqlite-database-admission.js";
@@ -21,9 +20,7 @@ import {
 } from "./session-accessor.sqlite-entry-cache-projection.js";
 import {
   emitPreparedSessionSharingChange,
-  invalidateSessionEntryPublication,
   publishSessionSharingEntryChange,
-  publishSessionSharingFieldChange,
 } from "./session-accessor.sqlite-entry-cache-publication.js";
 import {
   publishTrackedCacheUpdate,
@@ -89,11 +86,6 @@ type SessionEntryCacheUpdate = { sessionKey: string } & (
     }
   | { entry?: undefined; entryJson?: never }
 );
-
-/** Commit-driven projections borrow owner memory; ordinary reads still validate SQLite. */
-export function readCommittedSessionEntryCache(database: DatabaseSync) {
-  return sessionEntryCaches.get(database)?.entries;
-}
 
 /** Reuse only complete, current metadata; exact reads still own misses and invalid rows. */
 function readCachedExactSessionEntries(
@@ -400,46 +392,6 @@ export function publishSessionEntryCacheInvalidation(
           },
         }
       : { kind: "marker", sharingChange },
-  );
-}
-
-/** The category worker publishes only its changed field; native freshness tokens still expose other commits. */
-export function publishSessionEntryCacheCategoryUpdate(
-  database: SessionEntryCacheDatabase,
-  rows: ReadonlyArray<{ sessionKey: string; sessionId: string }>,
-  category: string | undefined,
-): void {
-  for (const { sessionKey, sessionId } of rows) {
-    publishSessionSharingFieldChange(database, sessionKey, {
-      kind: "category",
-      sessionId,
-      category: category ?? null,
-    });
-  }
-  publishTrackedCacheUpdate(
-    database,
-    () => {
-      const cached = sessionEntryCaches.get(database.db);
-      for (const { sessionKey, sessionId } of rows) {
-        const current = cached?.entries.get(sessionKey);
-        if (!current || current.sessionId !== sessionId) {
-          continue;
-        }
-        const next = { ...current };
-        if (category === undefined) {
-          delete next.category;
-        } else {
-          next.category = category;
-        }
-        cached?.entries.set(sessionKey, freezeJsonSnapshot(next));
-      }
-    },
-    undefined,
-    () => {
-      for (const { sessionKey } of rows) {
-        invalidateSessionEntryPublication(database, sessionKey);
-      }
-    },
   );
 }
 
