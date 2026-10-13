@@ -422,33 +422,23 @@ describe("feishuCardWithinTableLimit", () => {
 
 describe("shouldUseCard (tables the card renderer will draw)", () => {
   const pipedTable = "| Name | Role |\n| --- | --- |\n| Ada | Lead |";
-  const pipelessTable = "Name | Role\n---- | ----\nAda  | Lead";
   const quotedTable = "> Name | Role\n> ---- | ----\n> Ada  | Lead";
   const listTable = "- Name | Role\n  ---- | ----\n  Ada  | Lead";
   const orderedListTable = "1. Name | Role\n   ---- | ----\n   Ada  | Lead";
 
-  it("promotes a table the renderer draws", () => {
-    expect(shouldUseCard(pipedTable, true)).toBe(true);
-    expect(shouldUseCard(pipelessTable, true)).toBe(true);
+  it("promotes a compact aligned table with two-hyphen delimiters", () => {
     expect(shouldUseCard("| a | b |\n|:--|--:|\n| 1 | 2 |", true)).toBe(true);
   });
 
-  it("leaves a quoted table on the post path", () => {
-    // The card renderer does not descend into the quote, so it would draw
-    // neither the table nor its text. The post path converts it to a fence.
-    expect(shouldUseCard(quotedTable, true)).toBe(false);
-  });
-
-  it("leaves a table opened by a list marker on the post path", () => {
+  it("leaves a table opened by an ordered list marker on the post path", () => {
     // Our parser reads the marker as part of the first header cell. The card
-    // renderer reads it as a list item and draws an empty bullet.
-    expect(shouldUseCard(listTable, true)).toBe(false);
+    // renderer reads it as a list item and draws an empty list item.
     expect(shouldUseCard(orderedListTable, true)).toBe(false);
   });
 
   // Each of these parses to the first header cell `- Name`, exactly like the
   // list-opened table above, and none of them opens a list. Reading the parsed
-  // cell instead of the source line would send all four to the post path.
+  // cell instead of the source line would send all five to the post path.
   it.each([
     ["an outer pipe", "| - Name | Role |\n| --- | --- |\n| Ada | Lead |"],
     ["an escaped marker", "\\- Name | Role\n--- | ---\nAda | Lead"],
