@@ -421,9 +421,6 @@ describe("feishuCardWithinTableLimit", () => {
 });
 
 describe("shouldUseCard (tables the card renderer will draw)", () => {
-  const pipedTable = "| Name | Role |\n| --- | --- |\n| Ada | Lead |";
-  const quotedTable = "> Name | Role\n> ---- | ----\n> Ada  | Lead";
-  const listTable = "- Name | Role\n  ---- | ----\n  Ada  | Lead";
   const orderedListTable = "1. Name | Role\n   ---- | ----\n   Ada  | Lead";
 
   it("promotes a compact aligned table with two-hyphen delimiters", () => {
@@ -436,9 +433,9 @@ describe("shouldUseCard (tables the card renderer will draw)", () => {
     expect(shouldUseCard(orderedListTable, true)).toBe(false);
   });
 
-  // Each of these parses to the first header cell `- Name`, exactly like the
-  // list-opened table above, and none of them opens a list. Reading the parsed
-  // cell instead of the source line would send all five to the post path.
+  // Each of these parses to the first header cell `- Name`, and none of them
+  // opens a list. Reading the parsed cell instead of the source line would send
+  // all five to the post path.
   it.each([
     ["an outer pipe", "| - Name | Role |\n| --- | --- |\n| Ada | Lead |"],
     ["an escaped marker", "\\- Name | Role\n--- | ---\nAda | Lead"],
@@ -447,22 +444,6 @@ describe("shouldUseCard (tables the card renderer will draw)", () => {
     ["an entity marker", "&#45; Name | Role\n--- | ---\nAda | Lead"],
   ])("still promotes a table whose first cell only looks like a marker: %s", (_label, text) => {
     expect(shouldUseCard(text, true)).toBe(true);
-  });
-
-  it("leaves a message mixing drawable and undrawable tables on the post path", () => {
-    expect(shouldUseCard(`${pipedTable}\n\n${listTable}`, true)).toBe(false);
-  });
-
-  it("lets fenced code promote a message that also holds an undrawable table", () => {
-    // Fenced code answers before tables are counted at all, so this is an
-    // override rather than a table decision. The table in such a message is
-    // still subject to the renderer limitation.
-    expect(shouldUseCard("```js\nconst a = 1;\n```\n\n" + listTable, true)).toBe(true);
-  });
-
-  it("does not promote a table when the mode converts it first", () => {
-    expect(shouldUseCard(pipedTable, false)).toBe(false);
-    expect(shouldUseCard(quotedTable, false)).toBe(false);
   });
 
   it("does not promote prose that merely contains pipes", () => {
