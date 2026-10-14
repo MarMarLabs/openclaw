@@ -1,5 +1,8 @@
 // Feishu tests cover outbound markdown table modes, limits and presentation cards.
-import type { MessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
+import {
+  renderPresentationForDelivery,
+  type MessagePresentation,
+} from "openclaw/plugin-sdk/interactive-runtime";
 import {
   convertMarkdownTables,
   type MarkdownTableMode,
@@ -121,7 +124,11 @@ import {
 } from "./action-presentation-card.js";
 import { feishuPlugin } from "./channel.js";
 import { feishuOutbound, presentationTableMode } from "./outbound.js";
-import { hasCardMarkdownTable } from "./presentation-card.js";
+import {
+  feishuCardWithinTableLimit,
+  hasCardMarkdownTable,
+  isFeishuCardWithinEnvelope,
+} from "./presentation-card.js";
 
 type FeishuSendText = NonNullable<typeof feishuOutbound.sendText>;
 
@@ -546,6 +553,174 @@ describe("feishuOutbound.sendText markdown table modes in auto mode", () => {
     const joined = contents.join("\n");
     expect(names.filter((name) => !new RegExp(`${name}\\b`, "u").test(joined))).toEqual([]);
   });
+
+  // Each entry builds the card the way its production caller does. The core entry goes through
+  // the real shared renderer, which adapts the presentation first and hands the plugin the
+  // adapted payload beside the authored source, as deliver-channel.ts does.
+  async function presentationCardFor(
+    entry: "action" | "raw" | "core",
+    presentation: MessagePresentation,
+    cfg: ClawdbotConfig,
+  ) {
+    if (entry === "action") {
+      return deliverableFeishuActionCard(buildFeishuActionPresentationCard({ presentation, cfg }));
+    }
+    let payload: ReplyPayload = { text: "", presentation };
+    if (entry === "core") {
+      payload = await renderPresentationForDelivery(
+        {
+          presentationCapabilities: feishuOutbound.presentationCapabilities,
+          renderPresentation: (adapted, source) =>
+            feishuOutbound.renderPresentation?.({
+              payload: adapted,
+              presentation: adapted.presentation,
+              sourcePresentation: source,
+              ctx: {
+                cfg,
+                to: "chat_1",
+                text: adapted.text ?? "",
+                accountId: undefined,
+                payload: adapted,
+              },
+            }) ?? null,
+        },
+        payload,
+      );
+    }
+    const ctx = { cfg, to: "chat_1", text: payload.text ?? "", accountId: undefined, payload };
+    await feishuOutbound.sendPayload?.(ctx);
+    return sendCardCall()?.card;
+  }
+
+  const offTablesConfig: ClawdbotConfig = { channels: { feishu: { markdown: { tables: "off" } } } };
+  const okButtons: MessagePresentation["blocks"][number] = {
+    type: "buttons",
+    buttons: [{ label: "Ok", action: { type: "command", command: "/ok" } }],
+  };
+  const presentationEntries = ["action", "raw", "core"] as const;
+
+  function markdownContents(card: { body: { elements: unknown[] } } | undefined) {
+    const elements = (card?.body.elements ?? []) as { tag: string; content?: string }[];
+    return elements.flatMap((element) =>
+      element.tag === "markdown" ? [element.content ?? ""] : [],
+    );
+  }
+
+  // A table that fits one element stays native and whole. Listing it repeated a long header on
+  // every row, which grew a card that was deliverable before past the 30,720 byte envelope and
+  // took the controls with it.
+  it.each(
+    presentationEntries.flatMap((entry) =>
+      (["default", "off"] as const).map((tables) => ({ entry, tables })),
+    ),
+  )(
+    "keeps a short $entry presentation table whole beside long prose ($tables)",
+    async ({ entry, tables }) => {
+      const table = [
+        `| Name | ${"H".repeat(500)} |`,
+        "| --- | --- |",
+        ...Array.from({ length: 55 }, (_entry, index) => `| person-${index} | x |`),
+      ].join("\n");
+      const presentation: MessagePresentation = {
+        blocks: [{ type: "text", text: `${table}\n\n${"p".repeat(4000)}` }, okButtons],
+      };
+      const card = await presentationCardFor(
+        entry,
+        presentation,
+        tables === "off" ? offTablesConfig : emptyConfig,
+      );
+
+      expect(card && isFeishuCardWithinEnvelope(card)).toBe(true);
+      expect(card && feishuCardWithinTableLimit(card)).toBe(true);
+      expect(card?.body.elements.some((element: { tag: string }) => element.tag === "button")).toBe(
+        true,
+      );
+      const contents = markdownContents(card);
+      if (tables === "off") {
+        expect(contents.join("\n")).toContain("person-54");
+        return;
+      }
+      // The table stays native and arrives intact in one element.
+      const holders = contents.filter((content) => content.includes(table));
+      expect(holders.length).toBe(1);
+      expect(hasCardMarkdownTable(holders[0] ?? "")).toBe(true);
+    },
+  );
+
+  // A table that cannot fit one element is cut into pieces that each repeat the header inside a
+  // fence. Listing it grew a narrow table half again, and repeating the header natively counted
+  // one table per piece, so either lost the controls of a card that was deliverable before.
+  it.each(
+    presentationEntries.flatMap((entry) =>
+      (["narrow", "three"] as const).map((shape) => ({ entry, shape })),
+    ),
+  )(
+    "keeps a $shape oversized table card deliverable and readable on the $entry entry",
+    async ({ entry, shape }) => {
+      const rows = (count: number, tag: string) => [
+        `| Name | ${tag}xxxx |`,
+        "| --- | --- |",
+        ...Array.from({ length: count }, (_row, index) => `| ${tag}-person-${index} | cccccc |`),
+      ];
+      const text =
+        shape === "narrow"
+          ? `${rows(800, "N").join("\n")}\n\n${"p".repeat(4000)}`
+          : ["A", "B", "C"].map((tag) => rows(240, tag).join("\n")).join("\n\nprose\n\n");
+      // Guard the fixture: every table here is longer than one element.
+      expect(text.length).toBeGreaterThan(shape === "narrow" ? 20000 : 17000);
+      const card = await presentationCardFor(
+        entry,
+        { blocks: [{ type: "text", text }, okButtons] },
+        emptyConfig,
+      );
+
+      expect(card && isFeishuCardWithinEnvelope(card)).toBe(true);
+      expect(card && feishuCardWithinTableLimit(card)).toBe(true);
+      expect(card?.body.elements.some((element: { tag: string }) => element.tag === "button")).toBe(
+        true,
+      );
+      const contents = markdownContents(card);
+      const lastTag = shape === "narrow" ? "N-person-799" : "C-person-239";
+      for (const content of contents) {
+        const [first = "", second = ""] = content.split("\n");
+        // An element starts on a header and its delimiter or carries no pipe row at all.
+        expect(!first.startsWith("|") || /^\|[ :|-]*-[ :|-]*\|$/u.test(second)).toBe(true);
+      }
+      expect(contents.join("\n")).toContain(`| ${lastTag} | cccccc |`);
+    },
+  );
+
+  // The renderer core calls first has already cut the authored block at the text limit, so a
+  // conversion that lives only in the card builder never sees the table whole.
+  it.each(["default", "off"] as const)(
+    "keeps every row of a long presentation table readable after core adapts it (%s)",
+    async (tables) => {
+      const names = Array.from({ length: 200 }, (_entry, index) => `person-number-${index}`);
+      const rows = names.map((name) => `| ${name} | Regional Operations Lead |`);
+      const text = ["Roster.", "", "| Name | Role |", "| --- | --- |", ...rows, "", "End."].join(
+        "\n",
+      );
+      const card = await presentationCardFor(
+        "core",
+        { blocks: [{ type: "text", text }, okButtons] },
+        tables === "off" ? offTablesConfig : emptyConfig,
+      );
+
+      const contents = markdownContents(card);
+      expect(contents.length).toBeGreaterThan(1);
+      for (const content of contents) {
+        const [first = "", second = ""] = content.split("\n");
+        expect(
+          tables === "off"
+            ? !content.includes("•")
+            : !first.startsWith("|") || /^\|[ :|-]*-[ :|-]*\|$/u.test(second),
+          `element starting ${JSON.stringify(content.slice(0, 40))}`,
+        ).toBe(true);
+      }
+      const joined = contents.join("\n");
+      expect(names.filter((name) => !new RegExp(`${name}\\b`, "u").test(joined))).toEqual([]);
+    },
+  );
 
   // Root credentials make the implicit default account configured, so a send
   // without an account id resolves to it and reads the channel value.

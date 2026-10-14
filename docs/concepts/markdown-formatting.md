@@ -82,7 +82,9 @@ escaping table-delimiter punctuation rather than allowing native table parsing.
 This display-only escaping also applies to streamed reasoning; it does not change
 the authored text used for final posts, fallback delivery, or deduplication.
 A presentation addressed to a document comment falls back to comment text,
-because comments render no cards.
+because comments render no cards. When a presentation text block outgrows one
+card element, each table that fits stays native and whole in an element, and a
+table that does not fit is cut into code blocks that each repeat its header row.
 
 Per-channel plugin defaults: Feishu defaults to `block` (native tables in
 cards; `code` on the post path); Matrix defaults to `block` (native tables);

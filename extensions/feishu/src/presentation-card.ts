@@ -39,6 +39,7 @@ import {
   sanitizeNativeFeishuCard,
   type FeishuNativeCard,
 } from "./native-card.js";
+import { cutKeepingTables } from "./presentation-table-parts.js";
 
 type NormalizedMessagePresentation = NonNullable<ReturnType<typeof normalizeMessagePresentation>>;
 type FeishuPresentationTextFormat = "plain" | "markdown";
@@ -115,16 +116,21 @@ function projectBlockText(
   if (encodeText(rendered).length + reserve <= FEISHU_CARD_TEXT_MAX_LENGTH) {
     return [rendered];
   }
-  // A card draws a native table as one component, and this cut leaves its header and
-  // delimiter in the first element only, so every later element shows its rows as raw pipes.
-  // An ordinary card refuses that and takes the post path, which a presentation cannot take
-  // without losing its controls, so a table still native here becomes the list the other card
-  // paths fall back to. `off` asks for the authored pipes, which it keeps.
-  const splittable =
-    tableMode !== "off" && hasCardMarkdownTable(rendered)
-      ? convertMarkdownTables(rendered, "bullets")
-      : rendered;
-  const parts = fitBlockParts(splittable, ceiling, encodeText);
+  // A card draws a native table as one component, so a cut through it leaves its rows in later
+  // elements with no header, as raw pipes. An ordinary card takes the post path for that, which a
+  // presentation cannot take without losing its controls. A table that fits one element is kept
+  // whole instead, and a longer one is cut into fenced pieces that each repeat its header. A
+  // table the card cannot draw is a list, as on every other card path. `off` asks for the
+  // authored pipes, which it keeps.
+  const cut = (piece: string) => fitBlockParts(piece, ceiling, encodeText);
+  const parts =
+    tableMode === "off"
+      ? cut(rendered)
+      : cutKeepingTables(
+          hasUndrawableCardTable(rendered) ? convertMarkdownTables(rendered, "bullets") : rendered,
+          (piece) => encodeText(piece).length <= ceiling,
+          cut,
+        );
   // A quote prefix hides a fence marker from the chunker's scanner, so a quoted table
   // long enough to need several elements leaves its opening fence in one and its closing
   // fence in another, and neither draws a block. The send paths answer this the same way:

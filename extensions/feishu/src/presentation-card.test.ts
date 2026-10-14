@@ -5,6 +5,7 @@ import {
   buildFeishuPresentationCard,
   renderFeishuReplyPayload,
   feishuCardWithinTableLimit,
+  hasCardMarkdownTable,
   hasUndrawableCardTable,
   isFeishuCardWithinEnvelope,
   shouldUseCard,
@@ -383,6 +384,151 @@ describe("buildFeishuPresentationCard", () => {
     expect(joined).toContain(header);
     expect(joined).toContain("r79");
   });
+});
+
+// A card draws a native table as one component, so an element that starts on a data row shows raw
+// pipes. These tests ask what each element starts on and where the rows end up.
+describe("presentation tables across card elements", () => {
+  const tableOf = (count: number, tag = "A") => [
+    `| Name | ${tag}Role |`,
+    "| --- | --- |",
+    ...Array.from(
+      { length: count },
+      (_row, index) => `| ${tag}-person-${index} | Regional Operations Lead |`,
+    ),
+  ];
+  const proseOf = (length: number) =>
+    Array.from({ length: Math.ceil(length / 40) }, (_line, index) => `Prose line ${index} goes on.`)
+      .join("\n")
+      .slice(0, length);
+  const startsOnOrphan = (content: string) => {
+    const [first = "", second = ""] = content.split("\n");
+    return first.startsWith("|") && !/^\|[ :|-]*-[ :|-]*\|$/u.test(second);
+  };
+
+  function cardFor(text: string) {
+    const presentation = normalizeMessagePresentation({
+      blocks: [
+        { type: "text", text },
+        {
+          type: "buttons",
+          buttons: [{ label: "Ok", action: { type: "command", command: "/ok" } }],
+        },
+      ],
+    });
+    if (!presentation) {
+      throw new Error("expected valid presentation");
+    }
+    const card = buildFeishuPresentationCard({
+      presentation,
+      renderText: (value) => value,
+      tableMode: "block",
+    });
+    const elements = card.body.elements as { tag: string; content?: string }[];
+    const contents = elements.flatMap((element) =>
+      element.tag === "markdown" ? [element.content ?? ""] : [],
+    );
+    return { card, contents };
+  }
+
+  it("keeps a table that fits one element whole when the cut would have landed inside it", () => {
+    const table = tableOf(60).join("\n");
+    expect(table.length).toBeGreaterThan(2000);
+    expect(table.length).toBeLessThan(4000);
+    const { card, contents } = cardFor(`${proseOf(3000)}\n\n${table}\n\n${proseOf(3000)}`);
+
+    const holders = contents.filter((content) => content.includes(table));
+    expect(holders.length).toBe(1);
+    expect(hasCardMarkdownTable(holders[0] ?? "")).toBe(true);
+    expect(contents.filter(startsOnOrphan)).toEqual([]);
+    expect(feishuCardWithinTableLimit(card)).toBe(true);
+  });
+
+  it("cuts between two identical tables when only the first would have been cut", () => {
+    const table = tableOf(55).join("\n");
+    const { contents } = cardFor(`${proseOf(1900)}\n\n${table}\n\n${table}`);
+
+    expect(contents.filter((content) => content.includes(table)).length).toBe(2);
+    expect(contents.filter(startsOnOrphan)).toEqual([]);
+  });
+
+  it("repeats the header and delimiter inside a fence on every piece of an oversized table", () => {
+    const { card, contents } = cardFor(`${proseOf(500)}\n\n${tableOf(300).join("\n")}\n\nEnd.`);
+
+    const pieces = contents.filter((content) => content.includes("| A-person-"));
+    expect(pieces.length).toBeGreaterThan(1);
+    for (const piece of pieces) {
+      expect(piece.startsWith("```\n| Name | ARole |\n| --- | --- |\n")).toBe(true);
+      expect(piece.endsWith("\n```")).toBe(true);
+    }
+    for (const content of contents) {
+      expect(content.length).toBeLessThanOrEqual(4000);
+      expect(hasCardMarkdownTable(content)).toBe(false);
+    }
+    expect(feishuCardWithinTableLimit(card)).toBe(true);
+  });
+
+  it("fences an oversized table with a run longer than any backtick run in it", () => {
+    const rows = Array.from({ length: 300 }, (_row, index) => `| ${index} | \`\`\`code\`\`\` |`);
+    const { contents } = cardFor(["| n | cell |", "| --- | --- |", ...rows].join("\n"));
+
+    expect(contents.length).toBeGreaterThan(1);
+    for (const content of contents) {
+      expect(content.startsWith("````\n| n | cell |\n| --- | --- |\n")).toBe(true);
+      expect(content.endsWith("\n````")).toBe(true);
+    }
+  });
+
+  it("lists an oversized quoted table on the projection path instead of cutting its rows", async () => {
+    const quoted = tableOf(120)
+      .map((line) => `> ${line}`)
+      .join("\n");
+    expect(quoted.length).toBeGreaterThan(4000);
+    const { card } = await renderFeishuReplyPayload(
+      { text: "", presentation: { blocks: [{ type: "text", text: quoted }] } } as never,
+      { to: "chat_1", renderText: (text: string) => text, tableMode: "block" } as never,
+    );
+
+    const markdown = ((card?.body?.elements ?? []) as { tag: string; content?: string }[]).flatMap(
+      (element) => (element.tag === "markdown" ? [element.content ?? ""] : []),
+    );
+    expect(markdown.length).toBeGreaterThan(1);
+    expect(markdown.filter((content) => /^>? ?\|/mu.test(content))).toEqual([]);
+    expect(markdown.join("\n")).toContain("A-person-119");
+  });
+
+  it.each(
+    [20, 70, 160, 330].flatMap((rows) =>
+      [0, 1500, 3600].flatMap((before) => [0, 3000].map((after) => ({ rows, before, after }))),
+    ),
+  )(
+    "never starts an element on an orphan row ($rows rows, $before before, $after after)",
+    ({ rows, before, after }) => {
+      const text = [
+        before ? proseOf(before) : "",
+        tableOf(rows).join("\n"),
+        after ? proseOf(after) : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const { card, contents } = cardFor(text);
+
+      expect(contents.filter(startsOnOrphan)).toEqual([]);
+      expect(contents.filter((content) => content.length > 4000)).toEqual([]);
+      expect(feishuCardWithinTableLimit(card)).toBe(true);
+      // Every row arrives once and in order.
+      const joined = contents.join("\n");
+      let at = 0;
+      let ordered = true;
+      for (let row = 0; row < rows; row += 1) {
+        const found = joined.indexOf(`| A-person-${row} |`, at);
+        ordered &&= found >= at;
+        at = Math.max(at, found);
+      }
+      expect(ordered).toBe(true);
+      expect(joined.split("| A-person-").length - 1).toBe(rows);
+    },
+  );
 });
 
 describe("isFeishuCardWithinEnvelope", () => {
