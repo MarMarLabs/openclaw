@@ -115,8 +115,13 @@ vi.mock("./comment-reaction.js", async (importOriginal) => ({
   cleanupAmbientCommentTypingReaction: cleanupAmbientCommentTypingReactionMock,
 }));
 
+import {
+  buildFeishuActionPresentationCard,
+  deliverableFeishuActionCard,
+} from "./action-presentation-card.js";
 import { feishuPlugin } from "./channel.js";
-import { feishuOutbound } from "./outbound.js";
+import { feishuOutbound, presentationTableMode } from "./outbound.js";
+import { hasCardMarkdownTable } from "./presentation-card.js";
 
 type FeishuSendText = NonNullable<typeof feishuOutbound.sendText>;
 
@@ -468,6 +473,78 @@ describe("feishuOutbound.sendText markdown table modes in auto mode", () => {
       expect((message.match(/^> ```/gmu) ?? []).length % 2).toBe(0);
     }
     expect(delivered.join("")).toContain("row39");
+  });
+
+  // A card draws a native table as one component, so a cut across a presentation's elements
+  // leaves the header and delimiter in the first one and every later element shows its rows as
+  // raw pipes. The send and thread-reply actions build their card the way the action entry does
+  // here, and the prose around the table still leaves the table to be cut. `off` asks for the
+  // pipes the author wrote and keeps them.
+  it.each(
+    (["action", "raw", "core-rendered"] as const).flatMap((entry) =>
+      (["default", "off"] as const).map((tables) => ({ entry, tables })),
+    ),
+  )("keeps every row of a long $entry presentation table readable ($tables)", async (params) => {
+    const cfg: ClawdbotConfig =
+      params.tables === "off" ? { channels: { feishu: { markdown: { tables: "off" } } } } : {};
+    const names = Array.from({ length: 200 }, (_entry, index) => `person-number-${index}`);
+    const rows = names.map((name) => `| ${name} | Regional Operations Lead |`);
+    const text = ["Roster.", "", "| Name | Role |", "| --- | --- |", ...rows, "", "End."].join(
+      "\n",
+    );
+    // Guard the fixture: the default keeps tables native, and the block needs several elements.
+    expect(presentationTableMode({ cfg: emptyConfig })).toBe("block");
+    expect(text.length).toBeGreaterThan(8000);
+    const presentation: MessagePresentation = {
+      blocks: [
+        { type: "text", text },
+        {
+          type: "buttons",
+          buttons: [{ label: "Ok", action: { type: "command", command: "/ok" } }],
+        },
+      ],
+    };
+    let card =
+      params.entry === "action"
+        ? deliverableFeishuActionCard(buildFeishuActionPresentationCard({ presentation, cfg }))
+        : undefined;
+    if (params.entry !== "action") {
+      let payload: ReplyPayload = { text: "", presentation };
+      const ctx = { cfg, to: "chat_1", text: "", accountId: undefined, payload };
+      if (params.entry === "core-rendered") {
+        // Core hands the renderer the authored presentation beside its own cut.
+        const rendered = await feishuOutbound.renderPresentation?.({
+          payload,
+          presentation,
+          sourcePresentation: presentation,
+          ctx,
+        });
+        const { presentation: _presentation, ...consumed } = rendered ?? payload;
+        payload = consumed;
+      }
+      await feishuOutbound.sendPayload?.({ ...ctx, text: payload.text ?? "", payload });
+      card = sendCardCall()?.card;
+    }
+
+    const elements = (card?.body.elements ?? []) as { tag: string; content?: string }[];
+    expect(elements.some((element) => element.tag === "button")).toBe(true);
+    const contents = elements.flatMap((element) =>
+      element.tag === "markdown" ? [element.content ?? ""] : [],
+    );
+    expect(contents.length).toBeGreaterThan(1);
+    for (const content of contents) {
+      const outsideFences = content.replace(/^```[^\n]*\n[\s\S]*?^```$/gmu, "");
+      // An element carries no table rows or carries a table the card draws, and off carries
+      // its rows literally in every element.
+      expect(
+        params.tables === "off"
+          ? !content.includes("•")
+          : !/^\|/mu.test(outsideFences) || hasCardMarkdownTable(outsideFences),
+        `element starting ${JSON.stringify(content.slice(0, 40))}`,
+      ).toBe(true);
+    }
+    const joined = contents.join("\n");
+    expect(names.filter((name) => !new RegExp(`${name}\\b`, "u").test(joined))).toEqual([]);
   });
 
   // Root credentials make the implicit default account configured, so a send

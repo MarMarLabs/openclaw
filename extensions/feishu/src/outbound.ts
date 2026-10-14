@@ -477,12 +477,13 @@ export const feishuOutbound: ChannelOutboundAdapter = withFeishuOutboundSendCont
   ],
   renderPresentation: (params) => {
     const renderText = presentationTextRenderer(params.ctx);
-    const presentation = projectPresentationForDelivery({ ...params, renderText });
+    const tableMode = presentationTableMode(params.ctx);
+    const presentation = projectPresentationForDelivery({ ...params, renderText, tableMode });
     return renderFeishuPresentationPayload({
       ...params,
       payload: { ...params.payload, presentation },
       presentation,
-      ctx: { ...params.ctx, renderText, tableMode: presentationTableMode(params.ctx) },
+      ctx: { ...params.ctx, renderText, tableMode },
     });
   },
   sendPayload: async (ctx) => {

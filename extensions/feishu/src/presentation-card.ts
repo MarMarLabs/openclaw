@@ -108,13 +108,23 @@ function projectBlockText(
   renderText: (text: string) => string,
   reserve = 0,
   encodeText: (text: string) => string = escapeFeishuCardMarkdownText,
+  tableMode?: MarkdownTableMode,
 ): string[] {
   const ceiling = FEISHU_CARD_TEXT_MAX_LENGTH - reserve;
   const rendered = renderText(text);
   if (encodeText(rendered).length + reserve <= FEISHU_CARD_TEXT_MAX_LENGTH) {
     return [rendered];
   }
-  const parts = fitBlockParts(rendered, ceiling, encodeText);
+  // A card draws a native table as one component, and this cut leaves its header and
+  // delimiter in the first element only, so every later element shows its rows as raw pipes.
+  // An ordinary card refuses that and takes the post path, which a presentation cannot take
+  // without losing its controls, so a table still native here becomes the list the other card
+  // paths fall back to. `off` asks for the authored pipes, which it keeps.
+  const splittable =
+    tableMode !== "off" && hasCardMarkdownTable(rendered)
+      ? convertMarkdownTables(rendered, "bullets")
+      : rendered;
+  const parts = fitBlockParts(splittable, ceiling, encodeText);
   // A quote prefix hides a fence marker from the chunker's scanner, so a quoted table
   // long enough to need several elements leaves its opening fence in one and its closing
   // fence in another, and neither draws a block. The send paths answer this the same way:
@@ -316,9 +326,10 @@ function buildFeishuCardElementsForBlock(
   block: MessagePresentationBlock,
   renderText: (text: string) => string,
   encodeText: (text: string) => string,
+  tableMode?: MarkdownTableMode,
 ): Record<string, unknown>[] {
   if (block.type === "text") {
-    return projectBlockText(block.text, renderText, 0, encodeText).map((part) => ({
+    return projectBlockText(block.text, renderText, 0, encodeText, tableMode).map((part) => ({
       tag: "markdown",
       content: encodeText(part),
     }));
@@ -331,17 +342,21 @@ function buildFeishuCardElementsForBlock(
     // The colour tag is added after the split, so its own characters come out of the
     // budget the parts are sized to. A part carrying a fence gives the tag up and could
     // have had them back, which costs a little room rather than an oversized element.
-    return projectBlockText(block.text, renderText, FEISHU_CARD_GREY_LENGTH, encodeText).map(
-      (part) => {
-        const content = encodeText(part);
-        return {
-          tag: "markdown",
-          content: /```[\s\S]*?```/.test(content)
-            ? content
-            : `${FEISHU_CARD_GREY_OPEN}${content}${FEISHU_CARD_GREY_CLOSE}`,
-        };
-      },
-    );
+    return projectBlockText(
+      block.text,
+      renderText,
+      FEISHU_CARD_GREY_LENGTH,
+      encodeText,
+      tableMode,
+    ).map((part) => {
+      const content = encodeText(part);
+      return {
+        tag: "markdown",
+        content: /```[\s\S]*?```/.test(content)
+          ? content
+          : `${FEISHU_CARD_GREY_OPEN}${content}${FEISHU_CARD_GREY_CLOSE}`,
+      };
+    });
   }
   if (block.type === "divider") {
     return [{ tag: "hr" }];
@@ -408,12 +423,20 @@ function buildFeishuPresentationCardElements(params: {
   const fallbackText = params.fallbackText?.trim();
   if (fallbackText) {
     // The fallback is projected like any block and outgrows the limit the same way.
-    for (const part of projectBlockText(fallbackText, renderText, 0, encodeText)) {
+    for (const part of projectBlockText(
+      fallbackText,
+      renderText,
+      0,
+      encodeText,
+      params.tableMode,
+    )) {
       elements.push({ tag: "markdown", content: encodeText(part) });
     }
   }
   for (const block of params.presentation.blocks) {
-    elements.push(...buildFeishuCardElementsForBlock(block, renderText, encodeText));
+    elements.push(
+      ...buildFeishuCardElementsForBlock(block, renderText, encodeText, params.tableMode),
+    );
   }
   if (elements.length > 0) {
     return elements;
@@ -681,6 +704,7 @@ export function renderFeishuPresentationPayload({
 function projectPresentationBlocks(
   presentation: NormalizedMessagePresentation,
   renderText: (text: string) => string,
+  tableMode?: MarkdownTableMode,
 ): NormalizedMessagePresentation {
   const blocks: MessagePresentationBlock[] = [];
   for (const block of presentation.blocks) {
@@ -689,7 +713,7 @@ function projectPresentationBlocks(
       continue;
     }
     const reserve = block.type === "context" ? FEISHU_CARD_GREY_LENGTH : 0;
-    const parts = projectBlockText(block.text, renderText, reserve);
+    const parts = projectBlockText(block.text, renderText, reserve, undefined, tableMode);
     if (parts.length <= 1 && parts[0] === block.text) {
       blocks.push(block);
       continue;
@@ -711,12 +735,13 @@ export function projectPresentationForDelivery(params: {
   presentation: NormalizedMessagePresentation;
   sourcePresentation?: NormalizedMessagePresentation;
   renderText?: (text: string) => string;
+  tableMode?: MarkdownTableMode;
 }): NormalizedMessagePresentation {
   const { presentation, sourcePresentation, renderText } = params;
   if (!renderText || !sourcePresentation) {
     return presentation;
   }
-  const projected = projectPresentationBlocks(sourcePresentation, renderText);
+  const projected = projectPresentationBlocks(sourcePresentation, renderText, params.tableMode);
   const unchanged =
     projected.blocks.length === sourcePresentation.blocks.length &&
     projected.blocks.every((block, index) => block === sourcePresentation.blocks[index]);
@@ -765,7 +790,7 @@ export async function renderFeishuReplyPayload(
     {
       ...payload,
       presentation: ctx.renderText
-        ? projectPresentationBlocks(presentation, ctx.renderText)
+        ? projectPresentationBlocks(presentation, ctx.renderText, ctx.tableMode)
         : presentation,
     },
   );
