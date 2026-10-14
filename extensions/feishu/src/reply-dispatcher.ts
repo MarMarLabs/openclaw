@@ -51,7 +51,7 @@ import {
   FeishuStreamingSession,
   mergeStreamingText,
 } from "./streaming-card.js";
-import { queueFeishuStreamingUpdate } from "./streaming-update.js";
+import { projectFeishuStreamingCardText, queueFeishuStreamingUpdate } from "./streaming-update.js";
 import { createFeishuTableRouting } from "./table-routing.js";
 import { resolveReceiveIdType } from "./targets.js";
 import { addTypingIndicator, removeTypingIndicator, type TypingIndicatorState } from "./typing.js";
@@ -588,6 +588,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           closed = error.result;
           finalizationError = error;
         }
+        // A failed discard reports its rejected empty clear, not the answer. The card keeps the
+        // last update it accepted, so the answer was rejected only when that update lacks it.
+        const answerKeptOnCard =
+          closeNeedsPost &&
+          closed.content?.startsWith(projectFeishuStreamingCardText(text, tableMode)) === true;
         result = {
           ...createFeishuReplyDeliveryResult({
             results: [closed],
@@ -595,7 +600,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             content: closed.content,
             kind: "card",
           }),
-          ...(closed.finalTextAccepted === false ? { finalTextAccepted: false } : {}),
+          ...(closed.finalTextAccepted === false && !answerKeptOnCard
+            ? { finalTextAccepted: false }
+            : {}),
         };
         // A failed removal can leave the card visible, so only a clean discard hands
         // the text to a post instead.

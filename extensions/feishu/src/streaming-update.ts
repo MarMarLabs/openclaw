@@ -3,6 +3,11 @@ import type { RuntimeEnv } from "../runtime-api.js";
 import { literalizeFeishuCardTables } from "./card-table-shapes.js";
 import type { FeishuStreamingSession } from "./streaming-card.js";
 
+/** What a streaming card shows for `text`: off mode escapes its tables to literal rows. */
+export function projectFeishuStreamingCardText(text: string, tableMode: MarkdownTableMode): string {
+  return tableMode === "off" ? literalizeFeishuCardTables(text) : text;
+}
+
 /** Admit captured snapshots in order while the session owns provider writes. */
 export function queueFeishuStreamingUpdate(params: {
   queue: Promise<void>;
@@ -17,7 +22,7 @@ export function queueFeishuStreamingUpdate(params: {
   const { queue, session, startPromise, text, accountId, runtime } = params;
   // Keep authored state and receipt keys intact; only the card's display projection
   // escapes off-mode tables, including the separately accumulated reasoning stream.
-  const displayed = params.tableMode === "off" ? literalizeFeishuCardTables(text) : text;
+  const displayed = projectFeishuStreamingCardText(text, params.tableMode);
   if (displayed !== text && displayed.length > params.textChunkLimit) {
     return queue;
   }

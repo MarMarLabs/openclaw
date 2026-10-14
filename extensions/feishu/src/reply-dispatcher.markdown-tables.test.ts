@@ -10,7 +10,6 @@ import {
 import { createReplyDispatcher } from "openclaw/plugin-sdk/reply-runtime";
 import { afterAll, afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { ClawdbotConfig } from "../runtime-api.js";
-import type { FeishuStreamingSession } from "./streaming-card.js";
 
 type StreamingSessionStub = {
   active: boolean;
@@ -180,6 +179,7 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
 
 import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
 import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
+import { FeishuStreamingFinalizationError, type FeishuStreamingSession } from "./streaming-card.js";
 
 afterAll(() => {
   vi.doUnmock("./accounts.js");
@@ -1000,6 +1000,38 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
     expect(requireStreamingInstance(0).discard).toHaveBeenCalledTimes(1);
     expect(requireStreamingInstance(0).closeWithResult).not.toHaveBeenCalled();
     expect(sendMessageFeishuMock.mock.calls[0]?.[0]?.text).toContain(quoteReasoning(tableMarkdown));
+  });
+
+  // When that close cannot remove the card, the rejected empty clear says nothing about the
+  // answer: the card keeps the last update it accepted, the whole answer or an earlier preview.
+  // The reasoning drafts the answer, so only where the answer sits on the card tells them apart.
+  it.each([
+    { kept: "the answer", update: -1, recovered: [] },
+    { kept: "a stale preview", update: -2, recovered: ["Roster ready."] },
+  ])("delivers the answer once when a failed off close keeps $kept", async (row) => {
+    const { result, options } = createBlockTableHarness(tableCfg("off"), true);
+    result.replyOptions.onReasoningStream?.({ text: `${tableMarkdown}\n\nRoster ready.` });
+    result.replyOptions.onPartialReply?.({ text: "Roster" });
+    const delivery = await options.deliver({ text: "Roster ready." }, { kind: "final" });
+    const settled = delivery?.finalization?.catch((error: unknown) => error);
+    const instance = requireStreamingInstance(0);
+    const kept = () => String(instance.update.mock.calls.at(row.update)?.[0]);
+    instance.discard.mockImplementationOnce(async () => {
+      throw new FeishuStreamingFinalizationError(new Error("delete and clear rejected"), {
+        visibleReplySent: true,
+        content: kept(),
+        messageId: "om_stream",
+        finalTextAccepted: false,
+      });
+    });
+
+    await expect(options.onIdle?.()).rejects.toThrow("delete and clear rejected");
+    expect(kept()).toContain("Roster ready.");
+    const sent = [...sendStructuredCardFeishuMock.mock.calls, ...sendMessageFeishuMock.mock.calls];
+    expect(sent.map(([call]) => call.text)).toEqual(row.recovered);
+    expect(await settled).toMatchObject({
+      deliveryResult: { content: row.recovered[0] ?? kept(), visibleReplySent: true },
+    });
   });
 
   // The preview gives way to the authored table when its own conversion outgrows the limit,
