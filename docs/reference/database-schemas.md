@@ -232,7 +232,10 @@ transactional repair, and integrity checks remain with their existing owners.
 First-use schema owners skip additive DDL only when all their tables and indexes
 are present in the published facts. Missing objects use the existing installation
 transaction, which publishes the new schema facts on commit; rollback cannot
-publish a schema that did not commit. Ordinary connection replacement and data
+publish a schema that did not commit. Admission publications use the active
+connection’s transaction state and the store’s shared publication anchor, so
+PostgreSQL transactions also defer facts until commit and discard them on rollback.
+Ordinary connection replacement and data
 commits do not repeat schema validation. Schemas, stored bytes, and update behavior
 are unchanged.
 
@@ -400,6 +403,12 @@ clean-close seals or performs the required full validation; a seal hit does not
 queue a post-ready verification scan. Doctor and explicit verification retain
 full checks. See [integrity admission and Doctor maintenance](/reference/database-schemas/integrity-and-recovery#integrity-checks)
 for the seven-day verification interval and operator-requested verification.
+
+Gateway startup and restart checks admit only configured agent database targets.
+Retained stores for unconfigured agents remain untouched for Doctor to inspect.
+An incompatible secondary agent database refuses that agent's sessions with
+`openclaw doctor --fix` guidance, without blocking healthy agents or restarting
+the Gateway. Shared-state and required system-agent checks remain strict.
 
 Two mechanisms back that contract. CI runs
 `scripts/check-native-state-schema-version.mjs`, which fails the build when the
