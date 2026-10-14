@@ -310,6 +310,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   let streamText = "";
   let lastPartial = "";
   let reasoningText = "";
+  // The preview may store its projection, so the close needs the reasoning as written too.
+  let authoredReasoningText = "";
   let statusLine = "";
   let snapshotBaseText = "";
   let lastSnapshotTextLength = 0;
@@ -530,6 +532,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     streamText = "";
     lastPartial = "";
     reasoningText = "";
+    authoredReasoningText = "";
     statusLine = "";
     snapshotBaseText = "";
     lastSnapshotTextLength = 0;
@@ -548,6 +551,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     const finalizedAnswerText = streamText;
     const answerText = renderTables(finalizedAnswerText);
     const finalizedReasoningText = reasoningText;
+    const finalizedAuthoredReasoningText = authoredReasoningText;
     const outcome = {
       disposition,
       content: answerText,
@@ -569,6 +573,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         } = resolveStreamingCloseRoute({
           disposition,
           reasoning: finalizedReasoningText,
+          authoredReasoning: finalizedAuthoredReasoningText,
           answer: answerText,
           authoredAnswer: finalizedAnswerText,
           combine: buildCombinedStreamText,
@@ -1474,6 +1479,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             const nextThinking = previewReasoningMessage(payload.text);
             if (nextThinking) {
               reasoningText = nextThinking;
+              authoredReasoningText = formatReasoningMessage(payload.text);
               const answerPreview = previewAnswerText();
               if (answerPreview !== undefined) {
                 flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, answerPreview));

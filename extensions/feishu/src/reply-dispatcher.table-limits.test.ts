@@ -953,6 +953,24 @@ describe("createFeishuReplyDispatcher table limits", () => {
     expect(requireStreamingInstance(0).discard).toHaveBeenCalledTimes(1);
     expect(sendMessageFeishuMock).toHaveBeenCalled();
 
+    // An answer with nothing to convert leaves the reasoning the preview already projected as
+    // the only conversion in the body, and the close has to see that one too.
+    sendMessageFeishuMock.mockClear();
+    const plainAnswer = "p".repeat(2_000);
+    // Guard the fixture: the authored reasoning fits beside that answer, the projection does not.
+    expect(half.length * 2 + plainAnswer.length).toBeLessThanOrEqual(4000);
+    expect(convert(half, "code").length + plainAnswer.length).toBeGreaterThan(4000);
+
+    const plain = createBlockTableHarness(tableCfg("code"), true);
+    plain.result.replyOptions.onReasoningStream?.({ text: half });
+    expect(streamingInstances).toHaveLength(2);
+    plain.result.replyOptions.onPartialReply?.({ text: plainAnswer });
+    await plain.options.onIdle?.();
+
+    expect(requireStreamingInstance(1).closeWithResult).not.toHaveBeenCalled();
+    expect(requireStreamingInstance(1).discard).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).toHaveBeenCalled();
+
     sendMessageFeishuMock.mockClear();
     const authoredReasoning = "r".repeat(2_000);
     const authoredAnswer = "a".repeat(2_500);
@@ -964,12 +982,12 @@ describe("createFeishuReplyDispatcher table limits", () => {
 
     const authored = createBlockTableHarness(tableCfg("code"), true);
     authored.result.replyOptions.onReasoningStream?.({ text: authoredReasoning });
-    expect(streamingInstances).toHaveLength(2);
+    expect(streamingInstances).toHaveLength(3);
     authored.result.replyOptions.onPartialReply?.({ text: authoredAnswer });
     await authored.options.onIdle?.();
 
-    expect(requireStreamingInstance(1).closeWithResult).toHaveBeenCalledTimes(1);
-    expect(requireStreamingInstance(1).discard).not.toHaveBeenCalled();
+    expect(requireStreamingInstance(2).closeWithResult).toHaveBeenCalledTimes(1);
+    expect(requireStreamingInstance(2).discard).not.toHaveBeenCalled();
     expect(sendMessageFeishuMock).not.toHaveBeenCalled();
   });
 

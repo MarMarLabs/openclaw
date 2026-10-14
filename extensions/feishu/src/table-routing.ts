@@ -54,6 +54,7 @@ export function createFeishuTableRouting(params: {
   const resolveStreamingCloseRoute = (input: {
     disposition: "closed" | "discarded";
     reasoning: string;
+    authoredReasoning: string;
     answer: string;
     authoredAnswer: string;
     combine: (thinking: string, answer: string) => string;
@@ -89,9 +90,12 @@ export function createFeishuTableRouting(params: {
     // wrapped and set beside the answer, so the limit answers for that whole body rather
     // than for either half: two conversions that each fit it still write a card past it.
     // Text the author wrote long is no conversion's doing and closes the way it always
-    // has, which is why the projection has to differ from the authored combination.
+    // has, which is why the projection has to differ from the authored combination. The
+    // preview may have stored its own projection of the reasoning, so that combination
+    // reads the reasoning as written rather than as stored.
     const projectionExceedsLimit =
-      cardText !== authoredText && cardText.length > params.textChunkLimit;
+      cardText !== input.combine(input.authoredReasoning, input.authoredAnswer) &&
+      cardText.length > params.textChunkLimit;
     const needsPost =
       input.disposition === "closed" &&
       (tableNeedsPostPath(rawText) ||
