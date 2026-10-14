@@ -115,7 +115,11 @@ function closesFence(open: FeishuFenceLine, line: FeishuFenceLine): boolean {
   if (line.container === open.container) {
     return line.indent <= 3;
   }
-  return line.container === "" && line.column === open.column;
+  // A list marker on the opener's line carries on as indentation on the lines after it, while
+  // a quote marker is repeated on each, so the closer keeps the opener's quotes without its
+  // list markers, and at the column the opener's content sat at it closes the same block.
+  const continued = open.container.replaceAll("-", "");
+  return (line.container === "" || line.container === continued) && line.column === open.column;
 }
 
 /**

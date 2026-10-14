@@ -646,6 +646,46 @@ describe("createFeishuCommentReplyDispatcher", () => {
       );
     });
 
+    // A list marker on the opener's line carries on as indentation on the lines after it,
+    // while a quote marker is repeated on each, so a table nested in both closes its fence
+    // behind the quote alone. That closer belongs to the same block in either order, and a
+    // guard that read it as a stranger declined a table that fits one comment whole.
+    it.each([
+      { shape: "a list inside a quote", first: "> - ", rest: ">   " },
+      { shape: "a quote inside a list", first: "- > ", rest: "  > " },
+    ])("converts a comment table nested in $shape", async ({ first, rest }) => {
+      const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
+        "openclaw/plugin-sdk/reply-chunking",
+      );
+      const runtime = getFeishuRuntimeMock();
+      getFeishuRuntimeMock.mockReturnValue({
+        ...runtime,
+        channel: {
+          ...runtime.channel,
+          text: {
+            ...runtime.channel.text,
+            resolveTextChunkLimit: vi.fn(() => 4000),
+            resolveChunkMode: vi.fn(() => "length"),
+            chunkTextWithMode: chunking.chunkTextWithMode,
+            chunkMarkdownTextWithMode: chunking.chunkMarkdownTextWithMode,
+          },
+        },
+      });
+      const created = createTestCommentReplyDispatcher();
+      const rows = tableMarkdown.split("\n").map((row, index) => (index ? rest : first) + row);
+      const authored = `Roster:\n\n${rows.join("\n")}`;
+      const converted = actual.convertMarkdownTables(authored, "code");
+      // Guard the fixture: the opener carries the list marker and the closer does not.
+      expect(converted).toContain(`${first}\`\`\`\n`);
+      expect(converted.endsWith(`\n${rest}\`\`\``)).toBe(true);
+
+      await replyDispatcherOptions(created).deliver({ text: authored }, { kind: "final" });
+
+      expect(deliverCommentThreadTextMock.mock.calls.map((call) => call[1].content)).toEqual(
+        chunking.chunkMarkdownTextWithMode(converted, 4000, "length"),
+      );
+    });
+
     it.each(["length", "newline"] as const)(
       "balances the fences of an oversized converted table in %s mode",
       async (chunkMode) => {
