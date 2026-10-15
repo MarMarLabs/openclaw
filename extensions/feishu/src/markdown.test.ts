@@ -2,6 +2,7 @@ import { fromMarkdown, type CompileContext } from "mdast-util-from-markdown";
 import { gfmTableFromMarkdown } from "mdast-util-gfm-table";
 import { gfmTable } from "micromark-extension-gfm-table";
 import { convertMarkdownTables } from "openclaw/plugin-sdk/markdown-table-runtime";
+import { chunkMarkdownTextWithMode } from "openclaw/plugin-sdk/reply-chunking";
 import { describe, expect, it } from "vitest";
 import {
   buildFeishuPostMessageContent,
@@ -84,6 +85,16 @@ const fenceObserver = {
   },
 };
 
+/** Whether the production parser closes every fenced block it opens in this text. */
+function parserClosesEveryFence(text: string): boolean {
+  fenceSequences.clear();
+  fromMarkdown(text, {
+    extensions: [gfmTable()],
+    mdastExtensions: [gfmTableFromMarkdown(), fenceObserver],
+  });
+  return [...fenceSequences.values()].every((count) => count === 2);
+}
+
 /** Whether the production parser reads this text as exactly one code block that was closed. */
 function parserYieldsOneClosedBlock(text: string): boolean {
   fenceSequences.clear();
@@ -101,7 +112,8 @@ function parserYieldsOneClosedBlock(text: string): boolean {
 
 // The guard has to say what the parser says about a closer, because a chunk the guard passes is
 // delivered as it stands. Every row names the verdict the parser gives, and the guard is held to
-// the parser rather than to the row.
+// the parser and to the row. The guard asks the parser itself, so the row is what pins the verdict
+// by hand.
 describe("fence guard against the Markdown parser", () => {
   const F = "```";
   const cases = [
@@ -212,6 +224,74 @@ describe("fence guard against the Markdown parser", () => {
       lines: [`> ${F}`, "> x", "y", `> ${F}`],
       closed: false,
     },
+    // A list paragraph that came before the fence is part of what closes it.
+    {
+      name: "a quote inside a list item that is already open",
+      lines: ["- item", `  > ${F}`, "    > x", `  > ${F}`],
+      closed: true,
+    },
+    {
+      name: "the same quote with its body at the quote's own column",
+      lines: ["- item", `  > ${F}`, "  > x", `  > ${F}`],
+      closed: true,
+    },
+    {
+      name: "a closer that leaves the list item that is already open",
+      lines: ["- item", `  > - ${F}`, "  >   x", `>   ${F}`],
+      closed: false,
+    },
+    {
+      name: "an ordered list item that is already open",
+      lines: ["1. item", `   > ${F}`, "   > x", `   > ${F}`],
+      closed: true,
+    },
+    {
+      name: "a fence after a continuation line of the open item",
+      lines: ["- item", "  more", `  ${F}`, "  x", `  ${F}`],
+      closed: true,
+    },
+    {
+      name: "a closer that leaves an ordered list item that is already open",
+      lines: ["1. item", `   > ${F}`, "   > x", `> ${F}`],
+      closed: false,
+    },
+    // Only spaces and tabs may follow a closing marker.
+    {
+      name: "a no-break space after the closer",
+      lines: [`- ${F}`, "  x", `   ${F}\u00a0`],
+      closed: false,
+    },
+    {
+      name: "a no-break space after the closer, then the real one",
+      lines: [`- ${F}`, "  x", `   ${F}\u00a0`, "  y", `  ${F}`],
+      closed: true,
+    },
+    { name: "a space after the closer", lines: [`- ${F}`, "  x", `   ${F} `], closed: true },
+    {
+      name: "spaces and a tab after the closer",
+      lines: [`> ${F}`, "> x", `> ${F}  \t `],
+      closed: true,
+    },
+    {
+      name: "an em space after the closer",
+      lines: [`> ${F}`, "> x", `> ${F}\u2003`],
+      closed: false,
+    },
+    {
+      name: "an ideographic space after the closer",
+      lines: [`> ${F}`, "> x", `> ${F}\u3000`],
+      closed: false,
+    },
+    {
+      name: "a zero width space after the closer",
+      lines: [`> ${F}`, "> x", `> ${F}\u200b`],
+      closed: false,
+    },
+    {
+      name: "a no-break space after a tilde closer",
+      lines: ["~~~", "x", "~~~\u00a0"],
+      closed: false,
+    },
   ];
 
   it.each(cases)("agrees with the parser on $name", ({ lines, closed }) => {
@@ -223,6 +303,35 @@ describe("fence guard against the Markdown parser", () => {
       expect(chunkedFencesBalance(text, 4_000, "newline")).toBe(closed);
     }
   });
+
+  // A limit small enough to cut the block. The chunker closes and reopens a fence it can see, so
+  // a top-level one balances in every chunk, and it cannot see one behind a quote or a list
+  // marker, so those leave a chunk with an opener and no closer.
+  it.each([
+    { name: "a top-level fence", prefix: "", cut: true, balanced: true },
+    { name: "a quoted fence", prefix: "> ", cut: true, balanced: false },
+    { name: "a list fence", prefix: "- ", cut: true, balanced: false },
+    { name: "a quoted fence that fits one chunk", prefix: "> ", cut: false, balanced: true },
+  ])(
+    "cuts $name at a small limit and the guard follows the chunks",
+    ({ prefix, cut, balanced }) => {
+      const lines = [
+        `${prefix}${F}`,
+        ...["a", "b", "c", "d", "e", "f"]
+          .map((line) => line.repeat(8))
+          .map((line) => `${prefix.replace("-", " ")}${line}`),
+      ];
+      const text = [...lines, `${prefix.replace("-", " ")}${F}`].join("\n");
+      for (const mode of ["length", "newline"] as const) {
+        const limit = cut ? 20 : 4_000;
+        const chunks = chunkMarkdownTextWithMode(text, limit, mode);
+        expect(chunks.length > 1).toBe(cut);
+        expect(chunkedFencesBalance(text, limit, mode)).toBe(balanced);
+        // The parser agrees on each chunk the guard saw.
+        expect(chunks.every((chunk) => parserClosesEveryFence(chunk))).toBe(balanced);
+      }
+    },
+  );
 
   it("converts a table after a nested block the guard used to refuse", () => {
     // The first block is properly closed, so the generated fence is the only one left to balance.

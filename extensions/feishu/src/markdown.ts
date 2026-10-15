@@ -1,205 +1,63 @@
-import { fromMarkdown } from "mdast-util-from-markdown";
+import { fromMarkdown, type CompileContext, type Extension } from "mdast-util-from-markdown";
 import { gfmTableFromMarkdown } from "mdast-util-gfm-table";
 import { gfmTable } from "micromark-extension-gfm-table";
 import { chunkMarkdownTextWithMode, type ChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import type { MentionTarget } from "./mention-target.types.js";
 
-/**
- * A fence opener may carry an info string and a closer may not, and both sit behind the
- * table's source prefix. Quote markers pass, and so do the three spaces of indentation a
- * fence is allowed: a fourth makes the line indented code rather than a fence, which is
- * where the shared scanner draws the line too. Matching nothing else keeps an inline
- * backtick run in ordinary prose, and a backtick line inside an indented code block, from
- * reading as a marker and suppressing a table that would have converted safely. A closer
- * keeps the carriage return of a CRLF source, since the line split is on the feed alone.
- */
-type FeishuFenceLine = {
-  /** One entry per container, outermost first: 0 for a quote, else the width a list item's content starts at. */
-  containers: number[];
-  column: number;
-  indent: number;
-  marker: string;
-  info: string;
-};
-
-const FEISHU_TAB_STOP = 4;
 const FEISHU_LIST_MARKER = /^(?:[-*+]|\d{1,9}[.)])(?=[ \t])/u;
 // `.` skips a carriage return, so the info string is matched as everything but the feed.
 const FEISHU_FENCE_MARKER = /^(`{3,}|~{3,})([^\n]*)$/u;
 
 /**
- * Read the containers a line sits in before its marker run: quotes and list items, each
- * naming the block the fence belongs to. A quote marker is repeated on every line of its block,
- * while a list marker carries on as indentation, so an item is kept as the width its content
- * starts at, measured from where the content of the container around it starts.
+ * Whether a line is a fence marker behind any quote markers, list markers and indentation. This
+ * only finds the markers a chunk must deliver whole and the chunks worth asking the parser about,
+ * so how far a marker is indented does not matter here. A backtick fence carries no backtick in
+ * its info string, which keeps an inline run in ordinary prose from reading as a marker, and a
+ * tilde fence carries anything.
  */
-function readFenceLine(line: string): FeishuFenceLine | undefined {
-  let index = 0;
-  // A tab advances to the next stop of four, so indentation is counted in columns rather
-  // than characters: one tab is the four that make a line indented code.
-  let column = 0;
-  const containers: number[] = [];
-  let indent = 0;
-  // A quote or list marker takes the one column that follows it, so the content of the block
-  // it opens starts there and the four that make indented code are counted from that column.
-  // Every level is measured and the widest one settles the line, because four spaces before
-  // the first marker are already indented code and a marker after them does not undo that.
-  let markerColumn = 0;
-  let start = 0;
-  let listWidthPending = false;
+function isFenceMarkerLine(line: string): boolean {
+  let rest = line;
   for (;;) {
-    const columnStart = column;
-    while (line[index] === " " || line[index] === "\t") {
-      column =
-        line[index] === "\t" ? column + FEISHU_TAB_STOP - (column % FEISHU_TAB_STOP) : column + 1;
-      index += 1;
-    }
-    const gap = column - columnStart;
-    indent = Math.max(indent, gap - markerColumn);
-    if (markerColumn) {
-      // The run after a marker is where its block's content starts. A list item takes up to four
-      // of its spaces, and a longer run is indented code behind the one it keeps.
-      const content =
-        columnStart + (listWidthPending && gap >= 1 && gap <= 4 ? gap : Math.min(gap, 1));
-      if (listWidthPending) {
-        containers[containers.length - 1] = content - start;
-      }
-      start = content;
-    }
-    const rest = line.slice(index);
+    rest = rest.replace(/^[ \t]+/u, "");
     if (rest.startsWith(">")) {
-      containers.push(0);
-      listWidthPending = false;
-      index += 1;
-      column += 1;
-      markerColumn = 1;
+      rest = rest.slice(1);
       continue;
     }
     const list = FEISHU_LIST_MARKER.exec(rest);
     if (!list?.[0]) {
       break;
     }
-    containers.push(1);
-    listWidthPending = true;
-    index += list[0].length;
-    column += list[0].length;
-    markerColumn = 1;
+    rest = rest.slice(list[0].length);
   }
-  const marker = FEISHU_FENCE_MARKER.exec(line.slice(index));
-  if (!marker?.[1]) {
-    return undefined;
-  }
-  const info = marker[2] ?? "";
-  // A backtick fence carries no backtick in its info string, which keeps an inline run in
-  // ordinary prose from reading as a marker. A tilde fence carries anything, so a sample of
-  // backticks inside one is content rather than a block of its own.
-  if (marker[1].startsWith("`") && info.includes("`")) {
-    return undefined;
-  }
-  return { containers, column, indent, marker: marker[1], info };
+  const marker = FEISHU_FENCE_MARKER.exec(rest);
+  return Boolean(marker?.[1]) && !(marker?.[1]?.startsWith("`") && marker[2]?.includes("`"));
 }
 
 /**
- * Four spaces before anything else is indented code, not a fence, which is where the shared
- * scanner draws the line too, and a quote or list marker after them does not change that.
- * Inside a list item the same four spaces are where the item's content starts, so a fence
- * opened by the item's own marker line is closed by a marker at that column, which is why a
- * line that cannot open one can still close it.
- */
-function opensFence(line: FeishuFenceLine): boolean {
-  if (line.indent > 3) {
-    return false;
-  }
-  return line.containers.length > 0 || line.column <= 3;
-}
-
-/**
- * Carry a line over the containers a fence was opened in. A quote repeats its marker, at most
- * three columns past where the content around it starts, and a list item is indented to the
- * width its content starts at, whatever marker it began with. What remains is the line's own
- * indentation and text. A line that cannot be carried has left a container, which ends the block
- * and the fence with it. A blank remainder carries a list item but not a quote.
- */
-function carryContainers(
-  containers: readonly number[],
-  line: string,
-): { indent: number; text: string } | undefined {
-  let index = 0;
-  let column = 0;
-  let start = 0;
-  const skipBlank = () => {
-    while (line[index] === " " || line[index] === "\t") {
-      column =
-        line[index] === "\t" ? column + FEISHU_TAB_STOP - (column % FEISHU_TAB_STOP) : column + 1;
-      index += 1;
-    }
-  };
-  for (const width of containers) {
-    skipBlank();
-    if (width === 0) {
-      if (line[index] !== ">" || column - start > 3) {
-        return undefined;
-      }
-      index += 1;
-      column += 1;
-      start = column + (line[index] === " " || line[index] === "\t" ? 1 : 0);
-    } else if (line.slice(index).trim() !== "") {
-      if (column - start < width) {
-        return undefined;
-      }
-      start += width;
-    }
-  }
-  skipBlank();
-  return { indent: column - start, text: line.slice(index) };
-}
-
-/**
- * Four spaces past the start of the block a line sits in are indented code on a closer the
- * same way they are on an opener, so a marker that far in is body text and the fence stays
- * open past it. The indentation is measured after the containers have been carried over the
- * line, which is why a closer with no marker of its own can sit far to the right.
- */
-function closesFence(open: FeishuFenceLine, carried: { indent: number; text: string }): boolean {
-  const marker = FEISHU_FENCE_MARKER.exec(carried.text);
-  return (
-    marker?.[1] !== undefined &&
-    marker[1][0] === open.marker[0] &&
-    marker[1].length >= open.marker.length &&
-    (marker[2] ?? "").trim() === "" &&
-    carried.indent <= 3
-  );
-}
-
-/**
- * A chunk that opens a fence nothing closes renders worse than the table it replaced, so
- * the conversion only runs when every chunk closes what it opened. A run shorter than the
- * one that opened the block is body text, which is how a cell carrying its own backticks
- * survives inside the longer marker the conversion gave it. A marker behind other containers
- * is body text or a block of its own, and a line that leaves the fence's containers ends the
- * block unclosed, so neither closes it.
+ * A chunk that opens a fence nothing closes renders worse than the table it replaced, so the
+ * conversion only runs when every chunk closes what it opened. Whether a line closes a fence
+ * depends on every quote and list item around it, including a list the chunk opened before the
+ * fence, and on what follows the marker, so the parser answers it rather than a second reading
+ * of the rules. micromark emits one fence sequence for an opener and one for a closer, which
+ * makes a code node with two of them a closed block. A chunk with no marker line has no fence to
+ * ask about, which keeps the parse off ordinary prose.
  */
 function fencesBalance(chunk: string): boolean {
-  let open: FeishuFenceLine | undefined;
-  for (const text of chunk.split("\n")) {
-    if (!open) {
-      const fence = readFenceLine(text);
-      open = fence && opensFence(fence) ? fence : undefined;
-      continue;
-    }
-    const carried = carryContainers(open.containers, text);
-    if (!carried) {
-      return false;
-    }
-    if (closesFence(open, carried)) {
-      open = undefined;
-    }
+  if (!chunk.split("\n").some(isFenceMarkerLine)) {
+    return true;
   }
-  return open === undefined;
-}
-
-function isFenceMarkerLine(line: string): boolean {
-  return readFenceLine(line) !== undefined;
+  const sequences = new Map<object, number>();
+  parseFeishuMarkdown(chunk, {
+    exit: {
+      codeFencedFenceSequence(this: CompileContext) {
+        const code = this.stack.toReversed().find((node) => node.type === "code");
+        if (code) {
+          sequences.set(code, (sequences.get(code) ?? 0) + 1);
+        }
+      },
+    },
+  });
+  return [...sequences.values()].every((count) => count === 2);
 }
 
 /**
@@ -247,11 +105,14 @@ type FeishuPostMessageElement =
 
 const FEISHU_POST_MAX_BYTES = 30 * 1024;
 
-/** One parser contract for Feishu message and document Markdown decisions. */
-export function parseFeishuMarkdown(text: string): FeishuMarkdownNode {
+/**
+ * One parser contract for Feishu message and document Markdown decisions. An observer extension
+ * sees the same parse and changes nothing about it.
+ */
+export function parseFeishuMarkdown(text: string, ...observers: Extension[]): FeishuMarkdownNode {
   return fromMarkdown(text, {
     extensions: [gfmTable()],
-    mdastExtensions: [gfmTableFromMarkdown()],
+    mdastExtensions: [gfmTableFromMarkdown(), ...observers],
   }) as FeishuMarkdownNode;
 }
 
