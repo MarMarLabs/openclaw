@@ -560,9 +560,9 @@ describe("Feishu cards and delivery", () => {
     expect(feishuOutboundSendMediaMock).not.toHaveBeenCalled();
     expect(feishuOutboundSendTextMock).not.toHaveBeenCalled();
   });
-  it("hides raw card JSON and preserves trusted media access in oversized fallbacks", async () => {
+  it.each(["oversized-media"] as const)("uses payload fallback for %s presentations", async () => {
     feishuOutboundSendPayloadMock.mockResolvedValueOnce(receipt);
-    await run(
+    const result = await run(
       "send",
       {
         to: "chat:oc_group_1",
@@ -576,6 +576,7 @@ describe("Feishu cards and delivery", () => {
         ...trustedMediaContext,
       },
     );
+    expect(details(result)).toMatchObject({ ok: true, messageId: "om_sent" });
     expect(sendCardFeishuMock).not.toHaveBeenCalled();
     expect(feishuOutboundSendPayloadMock).toHaveBeenCalledOnce();
     const sent = args(feishuOutboundSendPayloadMock);
@@ -583,7 +584,11 @@ describe("Feishu cards and delivery", () => {
       text: "",
       mediaLocalRoots: ["/legacy/workspace"],
       mediaReadFile: legacyReadFile,
-      payload: { presentation: oversizedPresentation, mediaUrl: "pipeline.png", text: undefined },
+      payload: {
+        presentation: oversizedPresentation,
+        mediaUrl: "pipeline.png",
+        text: undefined,
+      },
     });
     expect(sent.mediaAccess).toBe(mediaAccess);
     expect(sent.mediaAccess).not.toBe(forgedMediaAccess);
