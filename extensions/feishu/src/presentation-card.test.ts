@@ -628,6 +628,25 @@ describe("presentation tables across card elements", () => {
     expect(delivered?.body.elements.some((element) => element.tag === "button")).toBe(true);
   });
 
+  // The sum of header, delimiter, one row, fence and escaping has to fit an element for a piece to
+  // repeat the header. Here it does not, so the table keeps the raw cut, as before. That is a size
+  // limit of this change, not a promise that every oversized table is readable.
+  it("keeps the raw cut when a header and one row cannot share an element", () => {
+    const table = [
+      `| Name | ${"H".repeat(2_000)} |`,
+      "| --- | --- |",
+      ...[0, 1].map((index) => `| person-${index} | ${"x".repeat(2_100)} |`),
+    ].join("\n");
+    const { card, contents } = cardFor(table);
+
+    // Guard the fixture: a fenced piece would need the header and a row in one element.
+    expect(2_000 + 2_100 + "| Name |  |\n| --- | --- |\n```\n```".length).toBeGreaterThan(4_000);
+    expect(admitted(card)).toBe(true);
+    expect(card.body.elements.some((element) => element.tag === "button")).toBe(true);
+    expect(contents.map((content) => content.trimEnd())).toEqual(markdownOf(rawCutCard([table])));
+    expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThan(7_000);
+  });
+
   it("weighs the repeated headers against the card with its mentions", () => {
     const mentions = Array.from({ length: 20 }, (_mention, index) => ({
       openId: `ou_${"x".repeat(24)}${String(index).padStart(3, "0")}`,
