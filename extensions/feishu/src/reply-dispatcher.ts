@@ -413,11 +413,13 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       return undefined;
     }
     const display = streamDisplayText();
-    // Only the converted form answers to this limit, and it answers for the message the card
-    // actually carries: the reasoning wrapped beside it, not the answer alone. Text the author
-    // wrote long is not this branch's doing and streams the way it always has.
-    return display !== streamText &&
-      buildCombinedStreamText(reasoningText, display).length > textChunkLimit
+    // Only a projection answers to this limit, and it answers for the message the card actually
+    // carries: the reasoning wrapped beside the answer, not the answer alone. The stored reasoning
+    // may be a projection as well, so the body is compared with the authored one, as the close
+    // does. Text the author wrote long is not this branch's doing and streams the way it always has.
+    const sent = buildCombinedStreamText(reasoningText, display);
+    return sent !== buildCombinedStreamText(authoredReasoningText, streamText) &&
+      sent.length > textChunkLimit
       ? undefined
       : display;
   };
