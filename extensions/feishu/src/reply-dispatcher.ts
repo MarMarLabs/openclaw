@@ -23,7 +23,7 @@ import type { ClawdbotConfig, OutboundIdentity, ReplyPayload, RuntimeEnv } from 
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { resolveConfiguredHttpTimeoutMs } from "./client-timeout.js";
 import { createFeishuClient } from "./client.js";
-import { resolveFeishuIdentityEmoji } from "./identity-header.js";
+import { resolveCardHeader, resolveCardNote } from "./identity-header.js";
 import { shouldSuppressFeishuTextForVoiceMedia } from "./media.js";
 import type { MentionTarget } from "./mention-target.types.js";
 import {
@@ -45,7 +45,7 @@ import {
 import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
 import { createFeishuReplySenders } from "./reply-senders.js";
 import { getFeishuRuntime } from "./runtime.js";
-import { chunkFeishuCardMarkdown, sendCardFeishu, type CardHeaderConfig } from "./send.js";
+import { chunkFeishuCardMarkdown, sendCardFeishu } from "./send.js";
 import {
   FeishuStreamingFinalizationError,
   FeishuStreamingSession,
@@ -97,38 +97,6 @@ function normalizeEpochMs(timestamp: number | undefined): number | undefined {
   // Defensive normalization: some payloads use seconds, others milliseconds.
   // Values below 1e12 are treated as epoch-seconds.
   return timestamp < MS_EPOCH_MIN ? timestamp * 1000 : timestamp;
-}
-
-function resolveCardHeader(
-  agentId: string,
-  identity: OutboundIdentity | undefined,
-): CardHeaderConfig | undefined {
-  const name = identity?.name?.trim() || (agentId === "main" ? "" : agentId);
-  const emoji = resolveFeishuIdentityEmoji(identity?.emoji);
-  const title = (emoji ? `${emoji} ${name}` : name).trim();
-  if (!title) {
-    return undefined;
-  }
-  return {
-    title,
-    template: identity?.theme ?? "blue",
-  };
-}
-
-function resolveCardNote(
-  agentId: string,
-  identity: OutboundIdentity | undefined,
-  prefixCtx: { model?: string; provider?: string },
-): string {
-  const name = identity?.name?.trim() || agentId;
-  const parts: string[] = [`Agent: ${name}`];
-  if (prefixCtx.model) {
-    parts.push(`Model: ${prefixCtx.model}`);
-  }
-  if (prefixCtx.provider) {
-    parts.push(`Provider: ${prefixCtx.provider}`);
-  }
-  return parts.join(" | ");
 }
 
 type CreateFeishuReplyDispatcherParams = {
@@ -313,6 +281,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   // The preview may store its projection, so the close needs the reasoning as written too.
   let authoredReasoningText = "";
   let statusLine = "";
+  let modelWaitLine = "";
   let snapshotBaseText = "";
   let lastSnapshotTextLength = 0;
   // Partial previews are replaceable; only committed final text may precede an error notice.
@@ -367,7 +336,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     const content = [thinking ? formatReasoningPrefix(thinking) : "", answer]
       .filter(Boolean)
       .join("\n\n---\n\n");
-    return [content, statusLine].filter(Boolean).join("\n\n");
+    return [content, modelWaitLine || statusLine].filter(Boolean).join("\n\n");
   };
 
   const flushStreamingCardUpdate = (combined: string) => {
@@ -536,6 +505,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     reasoningText = "";
     authoredReasoningText = "";
     statusLine = "";
+    modelWaitLine = "";
     snapshotBaseText = "";
     lastSnapshotTextLength = 0;
     hasStreamingFinalText = false;
@@ -749,7 +719,14 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     startStreaming();
     // A status line still belongs on the card while the answer stands down, so this
     // update carries the status without the answer the close will send elsewhere.
-    flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, previewAnswerText() ?? ""));
+    const answerPreview = previewAnswerText() ?? "";
+    let combined = buildCombinedStreamText(reasoningText, answerPreview);
+    // Progress can arrive after reasoning was projected. Recheck the body now carrying
+    // that line, without replacing the stored reasoning needed after the wait clears.
+    if (reasoningText !== authoredReasoningText && combined.length > textChunkLimit) {
+      combined = buildCombinedStreamText(authoredReasoningText, answerPreview);
+    }
+    flushStreamingCardUpdate(combined);
     return false;
   };
 
@@ -1500,6 +1477,16 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             ) {
               return false;
             }
+            if (payload.kind === "model-wait") {
+              if (payload.phase === "end" && !modelWaitLine) {
+                return false;
+              }
+              modelWaitLine = payload.phase === "end" ? "" : (payload.progressText ?? "");
+              if (!modelWaitLine && !buildCombinedStreamText(reasoningText, streamText)) {
+                return discardStreamingPreview().then(() => false);
+              }
+              return updateStreamingStatusLine(statusLine, payload.phase !== "end");
+            }
             const { kind: itemKind, ...item } = payload;
             const statusLineLocal = formatChannelProgressDraftLineForEntry(account.config, {
               event: "item",
@@ -1513,7 +1500,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           }
         : undefined,
       onAssistantMessageStart: previewStreamingEnabled
-        ? () => updateStreamingStatusLine("", false)
+        ? () => {
+            modelWaitLine = "";
+            return updateStreamingStatusLine("", false);
+          }
         : undefined,
       onCompactionStart: previewStreamingEnabled
         ? () => updateStreamingStatusLine("📦 **Compacting context...**")

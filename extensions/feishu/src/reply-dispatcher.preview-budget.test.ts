@@ -311,6 +311,60 @@ describe("createFeishuReplyDispatcher preview budget", () => {
     `| wide | ${"w".repeat(100)} |`,
   ].join("\n");
 
+  it.each(["answer", "reasoning"] as const)(
+    "includes a later model wait in the projected %s preview budget",
+    async (part) => {
+      const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
+      resolveFeishuAccountMock.mockReturnValue({
+        accountId: "main",
+        appId: "app_id",
+        appSecret: "app_secret",
+        domain: "feishu",
+        config: { renderMode: "card", streaming: { mode: "partial" } },
+      });
+      const table = half;
+      const wait = "Waiting for the local model to respond";
+      expect(convert(table, "code").length + wait.length * 50).toBeGreaterThan(4000);
+      expect(table.length * 2 + wait.length * 50).toBeLessThan(4000);
+      const { result, options } = createDispatcherHarness({
+        cfg: tableCfg("code"),
+        allowReasoningPreview: true,
+      });
+      await options.onReplyStart?.();
+      if (part === "answer") {
+        result.replyOptions.onPartialReply?.({ text: table });
+      } else {
+        result.replyOptions.onReasoningStream?.({ text: table });
+      }
+      await result.replyOptions.onItemEvent?.({
+        itemId: "model-wait",
+        kind: "model-wait",
+        phase: "update",
+        progressText: wait.repeat(50),
+        suppressDurableProgress: true,
+      });
+      await result.replyOptions.onItemEvent?.({
+        itemId: "model-wait",
+        kind: "model-wait",
+        phase: "end",
+        suppressDurableProgress: true,
+      });
+      await options.onIdle?.();
+      const updates = streamingUpdateTexts();
+      expect(updates.some((text) => text.includes("```"))).toBe(true);
+      const waiting = updates.find((text) => text.includes(wait));
+      expect(waiting).toBeDefined();
+      expect(updates.filter((text) => text.length > 4000)).toEqual([]);
+      expect(waiting).not.toContain("```");
+      if (part === "reasoning") {
+        expect(waiting).toContain("| wide |");
+      }
+      expect(updates.at(-1)).toContain("```");
+      expect(updates.at(-1)).not.toContain(wait);
+      expect(requireStreamingInstance(0).closeWithResult.mock.calls[0]?.[0]).not.toContain(wait);
+    },
+  );
+
   it("stands down for every plain partial that would push projected reasoning past the limit", async () => {
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
     // Guard the fixture: the projection fits the limit alone and not beside 1,800 characters,
