@@ -690,6 +690,67 @@ describe("feishuOutbound.sendText markdown table modes in auto mode", () => {
     },
   );
 
+  // A wide header fits a fenced piece, but repeating it for every piece grew this card from
+  // 7,730 bytes to 36,254, past the envelope. The card the raw cut delivered keeps its controls,
+  // and `off` never repeated anything.
+  it.each(
+    presentationEntries.flatMap((entry) =>
+      (["default", "off"] as const).map((tables) => ({ entry, tables })),
+    ),
+  )(
+    "keeps a wide header card the raw cut delivered on the $entry entry ($tables)",
+    async ({ entry, tables }) => {
+      const table = [
+        `| Name | ${"H".repeat(3_500)} |`,
+        "| --- | --- |",
+        ...Array.from({ length: 200 }, (_row, index) => `| person-${index} | x |`),
+      ].join("\n");
+      expect(table.length).toBe(7_215);
+      const card = await presentationCardFor(
+        entry,
+        { blocks: [{ type: "text", text: table }, okButtons] },
+        tables === "off" ? offTablesConfig : emptyConfig,
+      );
+
+      expect(card && isFeishuCardWithinEnvelope(card)).toBe(true);
+      expect(card && feishuCardWithinTableLimit(card)).toBe(true);
+      expect(card?.body.elements.some((element: { tag: string }) => element.tag === "button")).toBe(
+        true,
+      );
+      // The same size class as the raw cut, which was 7,730 bytes.
+      expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThan(8_000);
+      expect(markdownContents(card).join("\n")).toContain("| person-199 | x |");
+    },
+  );
+
+  // Five tables whose repeated headers each add a little and together add past the envelope.
+  it.each(presentationEntries)(
+    "keeps the controls of five wide tables the raw cut delivered on the %s entry",
+    async (entry) => {
+      const text = ["A", "B", "C", "D", "E"]
+        .map((tag) =>
+          [
+            `| Name | ${tag}${"H".repeat(1_500)} |`,
+            "| --- | --- |",
+            ...Array.from({ length: 200 }, (_row, index) => `| ${tag}-person-${index} | x |`),
+          ].join("\n"),
+        )
+        .join("\n\n");
+      const card = await presentationCardFor(
+        entry,
+        { blocks: [{ type: "text", text }, okButtons] },
+        emptyConfig,
+      );
+
+      expect(card && isFeishuCardWithinEnvelope(card)).toBe(true);
+      expect(card && feishuCardWithinTableLimit(card)).toBe(true);
+      expect(card?.body.elements.some((element: { tag: string }) => element.tag === "button")).toBe(
+        true,
+      );
+      expect(markdownContents(card).join("\n")).toContain("| E-person-199 | x |");
+    },
+  );
+
   // The renderer core calls first has already cut the authored block at the text limit, so a
   // conversion that lives only in the card builder never sees the table whole.
   it.each(["default", "off"] as const)(

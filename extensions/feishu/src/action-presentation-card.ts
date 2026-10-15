@@ -21,16 +21,24 @@ export function buildFeishuActionPresentationCard(params: {
   accountId?: string;
   fallbackText?: string;
 }): FeishuNativeCard | undefined {
-  if (!params.presentation) {
+  const { presentation } = params;
+  if (!presentation) {
     return undefined;
   }
   const modeContext = { cfg: params.cfg, accountId: params.accountId };
-  return buildFeishuPresentationCard({
-    presentation: params.presentation,
-    renderText: presentationTextRenderer(modeContext),
-    tableMode: presentationTableMode(modeContext),
-    ...(params.fallbackText === undefined ? {} : { fallbackText: params.fallbackText }),
-  });
+  const build = (rawTableCut: boolean) =>
+    buildFeishuPresentationCard({
+      presentation,
+      renderText: presentationTextRenderer(modeContext),
+      tableMode: presentationTableMode(modeContext),
+      rawTableCut,
+      ...(params.fallbackText === undefined ? {} : { fallbackText: params.fallbackText }),
+    });
+  // The split-safe cut repeats headers the raw cut does not, so a card only the raw cut gets
+  // admitted keeps its controls with that one. Neither admitted leaves the split-safe card to
+  // the caller's own fallback.
+  const card = build(false);
+  return deliverableFeishuActionCard(card) ?? deliverableFeishuActionCard(build(true)) ?? card;
 }
 
 export function deliverableFeishuActionCard(

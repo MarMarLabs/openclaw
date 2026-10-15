@@ -1,7 +1,9 @@
 import { normalizeMessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
 import { convertMarkdownTables } from "openclaw/plugin-sdk/text-chunking";
 import { describe, expect, it } from "vitest";
+import { chunkFeishuMarkdown } from "./markdown.js";
 import {
+  buildFeishuPayloadCard,
   buildFeishuPresentationCard,
   renderFeishuReplyPayload,
   feishuCardWithinTableLimit,
@@ -529,6 +531,129 @@ describe("presentation tables across card elements", () => {
       expect(joined.split("| A-person-").length - 1).toBe(rows);
     },
   );
+
+  // Repeating a header costs bytes the raw cut does not spend, and a wide header costs a lot of
+  // them. Admission is decided for the card, so a card the raw cut delivered is never lost to
+  // the repeated headers. The parent's cut is the raw chunker's elements, each its own block.
+  const wideTable = (tag: string, header: number, rows: number) =>
+    [
+      `| Name | ${tag}${"H".repeat(header)} |`,
+      "| --- | --- |",
+      ...Array.from({ length: rows }, (_row, index) => `| ${tag}-person-${index} | x |`),
+    ].join("\n");
+  const admitted = (card: Record<string, unknown>) =>
+    isFeishuCardWithinEnvelope(card) && feishuCardWithinTableLimit(card);
+  const identity = (value: string) => value;
+  function presentationOf(texts: string[]) {
+    const presentation = normalizeMessagePresentation({
+      blocks: [
+        ...texts.map((text) => ({ type: "text", text })),
+        {
+          type: "buttons",
+          buttons: [{ label: "Ok", action: { type: "command", command: "/ok" } }],
+        },
+      ],
+    });
+    if (!presentation) {
+      throw new Error("expected valid presentation");
+    }
+    return presentation;
+  }
+  /** The card the raw chunker's elements make, each its own block, which is the cut before a table was kept whole. */
+  const rawCutCard = (texts: string[]) =>
+    buildFeishuPresentationCard({
+      presentation: presentationOf(texts.flatMap((text) => chunkFeishuMarkdown(text, 4_000))),
+      renderText: identity,
+      tableMode: "block",
+    });
+  // Normalizing a block trims it, so the parent's pre-cut blocks lose the newline a cut ends on.
+  const markdownOf = (card: { body: { elements: unknown[] } }) =>
+    (card.body.elements as { tag: string; content?: string }[]).flatMap((element) =>
+      element.tag === "markdown" ? [(element.content ?? "").trimEnd()] : [],
+    );
+
+  it("never loses a card the raw cut delivered, however wide the header", () => {
+    const lost: string[] = [];
+    let fenced = 0;
+    let rawKept = 0;
+    for (const header of [6, 500, 1_500, 3_500]) {
+      for (const rows of [40, 120, 200, 500]) {
+        for (const after of [0, 4_000]) {
+          const table = wideTable("A", header, rows);
+          const text = after ? `${table}\n\n${proseOf(after)}` : table;
+          if (!admitted(rawCutCard([text]))) {
+            continue;
+          }
+          const delivered = buildFeishuPayloadCard({
+            payload: { presentation: presentationOf([text]) },
+            renderText: identity,
+            tableMode: "block",
+          });
+          if (!delivered) {
+            lost.push(`${header} header, ${rows} rows, ${after} after`);
+            continue;
+          }
+          fenced += markdownOf(delivered).some((content) => content.startsWith("```")) ? 1 : 0;
+          rawKept += markdownOf(delivered).some(startsOnOrphan) ? 1 : 0;
+        }
+      }
+    }
+    expect(lost).toEqual([]);
+    // Both outcomes occur in the grid, so neither the readable form nor the fallback is dead code.
+    expect(fenced).toBeGreaterThan(0);
+    expect(rawKept).toBeGreaterThan(0);
+  });
+
+  it("keeps the raw cut when several moderate repeated headers together outgrow the card", () => {
+    // Each table's headers add about a quarter to it, and five of them add past the envelope.
+    const tables = ["A", "B", "C", "D", "E"].map((tag) => wideTable(tag, 1_500, 200));
+    const presentation = presentationOf([tables.join("\n\n")]);
+    const safe = buildFeishuPresentationCard({
+      presentation,
+      renderText: identity,
+      tableMode: "block",
+    });
+    const raw = rawCutCard([tables.join("\n\n")]);
+    // Guard the fixture: only the raw cut is a card the API takes.
+    expect(admitted(safe)).toBe(false);
+    expect(admitted(raw)).toBe(true);
+
+    const delivered = buildFeishuPayloadCard({
+      payload: { presentation },
+      renderText: identity,
+      tableMode: "block",
+    });
+
+    expect(delivered && markdownOf(delivered)).toEqual(markdownOf(raw));
+    expect(delivered?.body.elements.some((element) => element.tag === "button")).toBe(true);
+  });
+
+  it("weighs the repeated headers against the card with its mentions", () => {
+    const mentions = Array.from({ length: 20 }, (_mention, index) => ({
+      openId: `ou_${"x".repeat(24)}${String(index).padStart(3, "0")}`,
+      name: `User${index}`,
+      key: `@_user_${index}`,
+    }));
+    const filler = [...Array.from({ length: 5 }, () => "p".repeat(3_900)), "p".repeat(500)];
+    const presentation = presentationOf([wideTable("T", 900, 300), ...filler]);
+    const raw = rawCutCard([wideTable("T", 900, 300), ...filler]);
+    // Guard the fixture: the split-safe card is admitted on its own, and with these mentions
+    // only the raw cut still is.
+    expect(
+      admitted(
+        buildFeishuPresentationCard({ presentation, renderText: identity, tableMode: "block" }),
+      ),
+    ).toBe(true);
+
+    const delivered = buildFeishuPayloadCard({
+      payload: { presentation },
+      mentions,
+      renderText: identity,
+      tableMode: "block",
+    });
+
+    expect(delivered && markdownOf(delivered).slice(1)).toEqual(markdownOf(raw));
+  });
 });
 
 describe("isFeishuCardWithinEnvelope", () => {

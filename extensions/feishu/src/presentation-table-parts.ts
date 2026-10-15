@@ -1,6 +1,39 @@
-// Feishu plugin module cuts presentation text around native tables instead of through them.
+// Feishu plugin module cuts presentation text into card elements, around native tables.
 import { getMarkdownTableSource } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { markdownToIRWithMeta } from "openclaw/plugin-sdk/text-chunking";
+import { chunkFeishuMarkdown } from "./markdown.js";
+
+/**
+ * The shared adapter splits a block to the text limit above before this module sees it,
+ * and `code` mode then pads every cell and adds a fence, so a block that arrived inside
+ * the limit can leave it. Split the projected form back, with the chunker that closes and
+ * reopens a fence rather than cutting one in half, and give each piece its own element.
+ */
+// The element carries the escaped text, and escaping turns one `&`, `<` or `>` into four
+// or five characters after the cut has already been made. Cutting the escaped text
+// instead would split an entity, so the budget comes down from the limit by whatever the
+// longest part actually measured, until the escaped parts fit.
+export function fitBlockParts(
+  text: string,
+  ceiling: number,
+  encodeText: (text: string) => string,
+): string[] {
+  let budget = ceiling;
+  let parts = chunkFeishuMarkdown(text, budget);
+  for (let attempt = 0; attempt < 8 && parts.length > 0; attempt += 1) {
+    const longest = Math.max(...parts.map((part) => encodeText(part).length));
+    if (longest <= ceiling) {
+      return parts;
+    }
+    const next = Math.floor((budget * ceiling) / longest);
+    if (next < 1 || next >= budget) {
+      break;
+    }
+    budget = next;
+    parts = chunkFeishuMarkdown(text, budget);
+  }
+  return parts;
+}
 
 /**
  * A card draws a table from its header and delimiter, so a piece of a table that starts on a
