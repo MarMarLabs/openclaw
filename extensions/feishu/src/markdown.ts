@@ -14,7 +14,8 @@ import type { MentionTarget } from "./mention-target.types.js";
  * keeps the carriage return of a CRLF source, since the line split is on the feed alone.
  */
 type FeishuFenceLine = {
-  container: string;
+  /** One entry per container, outermost first: 0 for a quote, else the width a list item's content starts at. */
+  containers: number[];
   column: number;
   indent: number;
   marker: string;
@@ -28,22 +29,24 @@ const FEISHU_FENCE_MARKER = /^(`{3,}|~{3,})([^\n]*)$/u;
 
 /**
  * Read the containers a line sits in before its marker run: quotes and list items, each
- * naming the block the fence belongs to, and the column where the content of that block
- * begins. A closer inside a list item carries no marker of its own, only the indentation
- * the item's content sits at, which is why the column is worth keeping.
+ * naming the block the fence belongs to. A quote marker is repeated on every line of its block,
+ * while a list marker carries on as indentation, so an item is kept as the width its content
+ * starts at, measured from where the content of the container around it starts.
  */
 function readFenceLine(line: string): FeishuFenceLine | undefined {
   let index = 0;
   // A tab advances to the next stop of four, so indentation is counted in columns rather
   // than characters: one tab is the four that make a line indented code.
   let column = 0;
-  let container = "";
+  const containers: number[] = [];
   let indent = 0;
   // A quote or list marker takes the one column that follows it, so the content of the block
   // it opens starts there and the four that make indented code are counted from that column.
   // Every level is measured and the widest one settles the line, because four spaces before
   // the first marker are already indented code and a marker after them does not undo that.
   let markerColumn = 0;
+  let start = 0;
+  let listWidthPending = false;
   for (;;) {
     const columnStart = column;
     while (line[index] === " " || line[index] === "\t") {
@@ -51,10 +54,22 @@ function readFenceLine(line: string): FeishuFenceLine | undefined {
         line[index] === "\t" ? column + FEISHU_TAB_STOP - (column % FEISHU_TAB_STOP) : column + 1;
       index += 1;
     }
-    indent = Math.max(indent, column - columnStart - markerColumn);
+    const gap = column - columnStart;
+    indent = Math.max(indent, gap - markerColumn);
+    if (markerColumn) {
+      // The run after a marker is where its block's content starts. A list item takes up to four
+      // of its spaces, and a longer run is indented code behind the one it keeps.
+      const content =
+        columnStart + (listWidthPending && gap >= 1 && gap <= 4 ? gap : Math.min(gap, 1));
+      if (listWidthPending) {
+        containers[containers.length - 1] = content - start;
+      }
+      start = content;
+    }
     const rest = line.slice(index);
     if (rest.startsWith(">")) {
-      container += ">";
+      containers.push(0);
+      listWidthPending = false;
       index += 1;
       column += 1;
       markerColumn = 1;
@@ -64,7 +79,8 @@ function readFenceLine(line: string): FeishuFenceLine | undefined {
     if (!list?.[0]) {
       break;
     }
-    container += "-";
+    containers.push(1);
+    listWidthPending = true;
     index += list[0].length;
     column += list[0].length;
     markerColumn = 1;
@@ -80,7 +96,7 @@ function readFenceLine(line: string): FeishuFenceLine | undefined {
   if (marker[1].startsWith("`") && info.includes("`")) {
     return undefined;
   }
-  return { container, column, indent, marker: marker[1], info };
+  return { containers, column, indent, marker: marker[1], info };
 }
 
 /**
@@ -94,56 +110,88 @@ function opensFence(line: FeishuFenceLine): boolean {
   if (line.indent > 3) {
     return false;
   }
-  return line.container !== "" || line.column <= 3;
+  return line.containers.length > 0 || line.column <= 3;
+}
+
+/**
+ * Carry a line over the containers a fence was opened in. A quote repeats its marker, at most
+ * three columns past where the content around it starts, and a list item is indented to the
+ * width its content starts at, whatever marker it began with. What remains is the line's own
+ * indentation and text. A line that cannot be carried has left a container, which ends the block
+ * and the fence with it. A blank remainder carries a list item but not a quote.
+ */
+function carryContainers(
+  containers: readonly number[],
+  line: string,
+): { indent: number; text: string } | undefined {
+  let index = 0;
+  let column = 0;
+  let start = 0;
+  const skipBlank = () => {
+    while (line[index] === " " || line[index] === "\t") {
+      column =
+        line[index] === "\t" ? column + FEISHU_TAB_STOP - (column % FEISHU_TAB_STOP) : column + 1;
+      index += 1;
+    }
+  };
+  for (const width of containers) {
+    skipBlank();
+    if (width === 0) {
+      if (line[index] !== ">" || column - start > 3) {
+        return undefined;
+      }
+      index += 1;
+      column += 1;
+      start = column + (line[index] === " " || line[index] === "\t" ? 1 : 0);
+    } else if (line.slice(index).trim() !== "") {
+      if (column - start < width) {
+        return undefined;
+      }
+      start += width;
+    }
+  }
+  skipBlank();
+  return { indent: column - start, text: line.slice(index) };
 }
 
 /**
  * Four spaces past the start of the block a line sits in are indented code on a closer the
  * same way they are on an opener, so a marker that far in is body text and the fence stays
- * open past it. The indentation a container's own markers carry is not the line's, which is
- * why the check reads the measured indent rather than the column; a closer with no marker of
- * its own carries the column its item's content starts at instead, and that is the width the
- * fence was opened at rather than any indentation the closer added.
+ * open past it. The indentation is measured after the containers have been carried over the
+ * line, which is why a closer with no marker of its own can sit far to the right.
  */
-function closesFence(open: FeishuFenceLine, line: FeishuFenceLine): boolean {
-  if (line.info.trim() !== "" || line.marker[0] !== open.marker[0]) {
-    return false;
-  }
-  if (line.marker.length < open.marker.length) {
-    return false;
-  }
-  if (line.container === open.container) {
-    return line.indent <= 3;
-  }
-  // A list marker on the opener's line carries on as indentation on the lines after it, while
-  // a quote marker is repeated on each, so the closer keeps the opener's quotes without its
-  // list markers, and at the column the opener's content sat at it closes the same block.
-  const continued = open.container.replaceAll("-", "");
-  return (line.container === "" || line.container === continued) && line.column === open.column;
+function closesFence(open: FeishuFenceLine, carried: { indent: number; text: string }): boolean {
+  const marker = FEISHU_FENCE_MARKER.exec(carried.text);
+  return (
+    marker?.[1] !== undefined &&
+    marker[1][0] === open.marker[0] &&
+    marker[1].length >= open.marker.length &&
+    (marker[2] ?? "").trim() === "" &&
+    carried.indent <= 3
+  );
 }
 
 /**
  * A chunk that opens a fence nothing closes renders worse than the table it replaced, so
  * the conversion only runs when every chunk closes what it opened. A run shorter than the
  * one that opened the block is body text, which is how a cell carrying its own backticks
- * survives inside the longer marker the conversion gave it. A marker in a different
- * container is body text too: a quoted line inside a top-level block belongs to the block
- * and closes nothing.
+ * survives inside the longer marker the conversion gave it. A marker behind other containers
+ * is body text or a block of its own, and a line that leaves the fence's containers ends the
+ * block unclosed, so neither closes it.
  */
 function fencesBalance(chunk: string): boolean {
   let open: FeishuFenceLine | undefined;
-  for (const line of chunk.split("\n")) {
-    const fence = readFenceLine(line);
-    if (!fence) {
-      continue;
-    }
+  for (const text of chunk.split("\n")) {
     if (!open) {
-      if (opensFence(fence)) {
-        open = fence;
-      }
+      const fence = readFenceLine(text);
+      open = fence && opensFence(fence) ? fence : undefined;
       continue;
     }
-    if (closesFence(open, fence)) {
+    const carried = carryContainers(open.containers, text);
+    if (!carried) {
+      return false;
+    }
+    if (closesFence(open, carried)) {
       open = undefined;
     }
   }
