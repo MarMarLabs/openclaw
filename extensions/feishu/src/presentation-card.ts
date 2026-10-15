@@ -439,13 +439,35 @@ function cardElementRenderer(
   };
 }
 
-export function buildFeishuPresentationCard(params: {
+type FeishuPresentationCardParams = {
   presentation: NormalizedMessagePresentation;
   fallbackText?: string;
   renderText?: (text: string) => string;
   tableMode?: MarkdownTableMode;
   rawTableCut?: boolean;
-}): FeishuNativeCard {
+};
+
+const cardAdmitted = (card: Record<string, unknown>) =>
+  isFeishuCardWithinEnvelope(card) && feishuCardWithinTableLimit(card);
+
+/**
+ * The card that can be delivered. The split-safe cut repeats headers the raw cut does not, so when
+ * only the raw cut is admitted that is the card, and the split-safe card is kept whenever it is
+ * admitted. A caller that names a cut gets that cut, because it weighs what the card carries
+ * besides this (the mentions) and asks again.
+ */
+export function buildFeishuPresentationCard(
+  params: FeishuPresentationCardParams,
+): FeishuNativeCard {
+  const card = buildPresentationCardOnce(params);
+  if (params.rawTableCut !== undefined || params.tableMode === "off" || cardAdmitted(card)) {
+    return card;
+  }
+  const raw = buildPresentationCardOnce({ ...params, rawTableCut: true });
+  return cardAdmitted(raw) ? raw : card;
+}
+
+function buildPresentationCardOnce(params: FeishuPresentationCardParams): FeishuNativeCard {
   const elementParams = {
     ...params,
     ...(params.renderText
@@ -594,9 +616,7 @@ function buildAdmittedPayloadCard(
     assertFeishuCardWithinEnvelope(card, "Feishu native card");
     return markRenderedFeishuCard(card);
   }
-  return isFeishuCardWithinEnvelope(card) && feishuCardWithinTableLimit(card)
-    ? markRenderedFeishuCard(card)
-    : undefined;
+  return cardAdmitted(card) ? markRenderedFeishuCard(card) : undefined;
 }
 
 type FeishuPresentationContext = {

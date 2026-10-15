@@ -612,6 +612,7 @@ describe("presentation tables across card elements", () => {
       presentation,
       renderText: identity,
       tableMode: "block",
+      rawTableCut: false,
     });
     const raw = rawCutCard([tables.join("\n\n")]);
     // Guard the fixture: only the raw cut is a card the API takes.
@@ -647,6 +648,25 @@ describe("presentation tables across card elements", () => {
     expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThan(7_000);
   });
 
+  // The builder is what the send and thread-reply actions call, so it hands back the card that
+  // can be delivered. A cut that is asked for by name is built as asked.
+  it("builds the card that will be delivered unless a cut is asked for", () => {
+    const table = wideTable("W", 3_500, 200);
+    const params = {
+      presentation: presentationOf([table]),
+      renderText: identity,
+      tableMode: "block" as const,
+    };
+    const built = buildFeishuPresentationCard(params);
+
+    expect(admitted(built)).toBe(true);
+    expect(markdownOf(built)).toEqual(markdownOf(rawCutCard([table])));
+    expect(admitted(buildFeishuPresentationCard({ ...params, rawTableCut: false }))).toBe(false);
+    expect(markdownOf(buildFeishuPresentationCard({ ...params, rawTableCut: true }))).toEqual(
+      markdownOf(built),
+    );
+  });
+
   it("weighs the repeated headers against the card with its mentions", () => {
     const mentions = Array.from({ length: 20 }, (_mention, index) => ({
       openId: `ou_${"x".repeat(24)}${String(index).padStart(3, "0")}`,
@@ -660,7 +680,12 @@ describe("presentation tables across card elements", () => {
     // only the raw cut still is.
     expect(
       admitted(
-        buildFeishuPresentationCard({ presentation, renderText: identity, tableMode: "block" }),
+        buildFeishuPresentationCard({
+          presentation,
+          renderText: identity,
+          tableMode: "block",
+          rawTableCut: false,
+        }),
       ),
     ).toBe(true);
 
