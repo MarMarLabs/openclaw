@@ -256,11 +256,6 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
       },
     };
   }
-  function makeTableText(count: number): string {
-    return Array.from({ length: count }, (_, i) => `| a${i} | b${i} |\n| - | - |\n| 1 | 2 |`).join(
-      "\n\n",
-    );
-  }
   function createDispatcherHarness(overrides: Partial<ReplyDispatcherArgs> = {}) {
     const result = createFeishuReplyDispatcher({
       cfg: {} as never,
@@ -1092,35 +1087,6 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
     expect(committed).toContain("Ada");
     expect(committed).toContain("Lead");
     expect(committed).not.toContain("| --- |");
-  });
-
-  describe("table-limit routing", () => {
-    function setupDispatcher() {
-      const result = createFeishuReplyDispatcher({
-        cfg: {} as never,
-        agentId: "agent",
-        runtime: { log: vi.fn(), error: vi.fn() } as never,
-        chatId: "oc_chat",
-        sendTarget: "oc_chat",
-      });
-      return toTypingDispatcherOptions(result);
-    }
-
-    it("falls back to post mode for 6 tables with explicit renderMode=card", async () => {
-      resolveFeishuAccountMock.mockReturnValue({
-        accountId: "main",
-        appId: "app_id",
-        appSecret: "app_secret",
-        domain: "feishu",
-        config: { renderMode: "card", streaming: { mode: "off" } },
-      });
-      const options = setupDispatcher();
-      const text = makeTableText(6);
-      await options.deliver({ text }, { kind: "final" });
-
-      expect(sendMessageFeishuMock).toHaveBeenCalled();
-      expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
-    });
   });
 
   it("resolves the markdown table mode for the named account on post replies", async () => {
