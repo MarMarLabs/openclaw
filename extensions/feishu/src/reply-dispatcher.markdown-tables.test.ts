@@ -665,6 +665,25 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
     expect(committed).not.toMatch(/_\| Ada {2}\| Lead \|_/u);
   });
 
+  // A tilde fence hides a sample from the table parser exactly as a backtick one does, so
+  // the formatter has to read its markers. Underscoring them leaves a bare table behind
+  // for the card and post routing to convert, move or draw.
+  it.each(
+    ["```", "~~~"].flatMap((fence) =>
+      (["block", "code", "bullets", "off"] as const).map((tables) => ({ fence, tables })),
+    ),
+  )("keeps a $fence-fenced table in delivered $tables reasoning as written", async (row) => {
+    const { options } = createBlockTableHarness(tableCfg(row.tables));
+    const sample = `${row.fence}\n${tableMarkdown}\n${row.fence}`;
+    await options.deliver({ text: `Checking.\n\n${sample}`, isReasoning: true }, { kind: "final" });
+    await options.onIdle?.();
+
+    expect(requireStreamingInstance(0).closeWithResult.mock.calls[0]?.[0]).toBe(
+      `Thinking\n\n_Checking._\n\n${sample}`,
+    );
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+  });
+
   // A fence is not the only shape the mode produces. `block` leaves a native table
   // and `bullets` emits list markers, and underscoring those lines stops Feishu
   // recognising either one.

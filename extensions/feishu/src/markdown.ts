@@ -33,6 +33,22 @@ function isFenceMarkerLine(line: string): boolean {
   return Boolean(marker?.[1]) && !(marker?.[1]?.startsWith("`") && marker[2]?.includes("`"));
 }
 
+// Each fenced code node in the chunk, with how many fence markers the parser found on it.
+function fencedCode(chunk: string) {
+  const sequences = new Map<CompileContext["stack"][number], number>();
+  parseFeishuMarkdown(chunk, {
+    exit: {
+      codeFencedFenceSequence(this: CompileContext) {
+        const code = this.stack.toReversed().find((node) => node.type === "code");
+        if (code) {
+          sequences.set(code, (sequences.get(code) ?? 0) + 1);
+        }
+      },
+    },
+  });
+  return sequences;
+}
+
 /**
  * A chunk that opens a fence nothing closes renders worse than the table it replaced, so the
  * conversion only runs when every chunk closes what it opened. Whether a line closes a fence
@@ -46,18 +62,27 @@ function fencesBalance(chunk: string): boolean {
   if (!chunk.split("\n").some(isFenceMarkerLine)) {
     return true;
   }
-  const sequences = new Map<object, number>();
-  parseFeishuMarkdown(chunk, {
-    exit: {
-      codeFencedFenceSequence(this: CompileContext) {
-        const code = this.stack.toReversed().find((node) => node.type === "code");
-        if (code) {
-          sequences.set(code, (sequences.get(code) ?? 0) + 1);
-        }
-      },
-    },
-  });
-  return [...sequences.values()].every((count) => count === 2);
+  return [...fencedCode(chunk).values()].every((count) => count === 2);
+}
+
+/**
+ * The zero-based lines the parser reads as part of a fenced code block, markers included, so a
+ * caller that must leave a sample alone asks the same parser that later decides what is a table.
+ * Which character closes a fence, and at what length, is the parser's answer and not a second one.
+ */
+export function fencedCodeLines(text: string): Set<number> {
+  const lines = new Set<number>();
+  if (!text.split("\n").some(isFenceMarkerLine)) {
+    return lines;
+  }
+  for (const code of fencedCode(text).keys()) {
+    const first = code.position?.start.line ?? 1;
+    const last = code.position?.end.line ?? first;
+    for (let line = first; line <= last; line += 1) {
+      lines.add(line - 1);
+    }
+  }
+  return lines;
 }
 
 /**
