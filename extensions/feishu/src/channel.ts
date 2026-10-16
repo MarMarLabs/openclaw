@@ -981,7 +981,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
         messageToolHints: ({ cfg, accountId }) => {
           const actions = describeFeishuMessageTool({
             cfg,
-            accountId: accountId ?? undefined,
+            accountId,
           }).actions;
           return [
             "- Feishu targeting: omit `target` to reply to the current conversation (auto-inferred). Explicit targets: `user:open_id` or `chat:chat_id`.",
@@ -1075,7 +1075,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
           const { assertDirectAdapterHandoff } = ctx;
           const account = resolveFeishuAccount({
             cfg: ctx.cfg,
-            accountId: ctx.accountId ?? undefined,
+            accountId: ctx.accountId,
           });
           if (
             (ctx.action === "react" || ctx.action === "reactions") &&
@@ -1185,7 +1185,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
               cfg: ctx.cfg,
               to,
               text: text ?? "",
-              accountId: ctx.accountId ?? undefined,
+              accountId: ctx.accountId,
               ...(ctx.mediaAccess ? { mediaAccess: ctx.mediaAccess } : {}),
               mediaLocalRoots: ctx.mediaLocalRoots,
               ...(ctx.mediaReadFile ? { mediaReadFile: ctx.mediaReadFile } : {}),
@@ -1449,7 +1449,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
               cfg: ctx.cfg,
               query,
               limit,
-              accountId: ctx.accountId ?? undefined,
+              accountId: ctx.accountId,
               fallbackToStatic: false,
             };
             const groupDirectoryParams = {
