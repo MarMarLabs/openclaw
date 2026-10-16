@@ -33,22 +33,6 @@ function isFenceMarkerLine(line: string): boolean {
   return Boolean(marker?.[1]) && !(marker?.[1]?.startsWith("`") && marker[2]?.includes("`"));
 }
 
-// Each fenced code node in the chunk, with how many fence markers the parser found on it.
-function fencedCode(chunk: string) {
-  const sequences = new Map<CompileContext["stack"][number], number>();
-  parseFeishuMarkdown(chunk, {
-    exit: {
-      codeFencedFenceSequence(this: CompileContext) {
-        const code = this.stack.toReversed().find((node) => node.type === "code");
-        if (code) {
-          sequences.set(code, (sequences.get(code) ?? 0) + 1);
-        }
-      },
-    },
-  });
-  return sequences;
-}
-
 /**
  * A chunk that opens a fence nothing closes renders worse than the table it replaced, so the
  * conversion only runs when every chunk closes what it opened. Whether a line closes a fence
@@ -62,20 +46,38 @@ function fencesBalance(chunk: string): boolean {
   if (!chunk.split("\n").some(isFenceMarkerLine)) {
     return true;
   }
-  return [...fencedCode(chunk).values()].every((count) => count === 2);
+  const sequences = new Map<object, number>();
+  parseFeishuMarkdown(chunk, {
+    exit: {
+      codeFencedFenceSequence(this: CompileContext) {
+        const code = this.stack.toReversed().find((node) => node.type === "code");
+        if (code) {
+          sequences.set(code, (sequences.get(code) ?? 0) + 1);
+        }
+      },
+    },
+  });
+  return [...sequences.values()].every((count) => count === 2);
 }
 
 /**
- * The zero-based lines the parser reads as part of a fenced code block, markers included, so a
- * caller that must leave a sample alone asks the same parser that later decides what is a table.
- * Which character closes a fence, and at what length, is the parser's answer and not a second one.
+ * The zero-based lines that sit in a code block, fenced or indented, markers included. Table
+ * conversion and routing read Markdown with HTML switched off, where a `<div>` line is plain text
+ * and cannot take the fence after it, so this parse switches the HTML constructs off to agree with
+ * them. Which character closes a fence, and at what length, is the parser's answer and not a
+ * second one. The parser drops a leading byte order mark, which would shift its offsets, so the
+ * text must already be trimmed.
  */
-export function fencedCodeLines(text: string): Set<number> {
+export function codeBlockLines(text: string): Set<number> {
   const lines = new Set<number>();
-  // The parser ends a line at a lone carriage return too, so the marker prefilter does as well.
-  if (!text.split(/\r\n|\r|\n/u).some(isFenceMarkerLine)) {
+  // A code block needs a fence run or four columns of indentation, which prose seldom has.
+  if (!/`{3}|~{3}|\t| {4}/u.test(text)) {
     return lines;
   }
+  const root = fromMarkdown(text, {
+    extensions: [gfmTable(), { disable: { null: ["htmlFlow", "htmlText"] } }],
+    mdastExtensions: [gfmTableFromMarkdown()],
+  });
   // Lines are counted from offsets. The parser's own line numbers also count a lone carriage
   // return, and a block its container ends stops at the start of the next line.
   const feeds: number[] = [];
@@ -95,13 +97,16 @@ export function fencedCodeLines(text: string): Set<number> {
     }
     return low;
   };
-  for (const code of fencedCode(text).keys()) {
-    const start = code.position?.start.offset ?? 0;
-    const last = lineAt(Math.max(start, (code.position?.end.offset ?? text.length) - 1));
+  visitFeishuMarkdown(root, (node) => {
+    if (node.type !== "code") {
+      return;
+    }
+    const start = node.position?.start.offset ?? 0;
+    const last = lineAt(Math.max(start, (node.position?.end.offset ?? text.length) - 1));
     for (let line = lineAt(start); line <= last; line += 1) {
       lines.add(line);
     }
-  }
+  });
   return lines;
 }
 

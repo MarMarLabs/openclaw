@@ -386,6 +386,28 @@ describe("createFeishuReplyDispatcher preview budget", () => {
     expect(updates.filter((text) => text.length > 4_000)).toEqual([]);
   });
 
+  // Table conversion and routing read Markdown with HTML off, where a tag line before a sample is
+  // plain text and cannot take the fence with it. The delivered reasoning formatter has to read
+  // it the same way, or it italicises the markers and the sample is converted or rerouted.
+  it.each(
+    ["```", "~~~"].flatMap((fence) =>
+      (["block", "code", "bullets", "off"] as const).map((tables) => ({ fence, tables })),
+    ),
+  )("keeps a $fence-fenced table beside HTML tags in delivered $tables reasoning", async (row) => {
+    const { options } = createBlockTableHarness(tableCfg(row.tables));
+    const sample = `${row.fence}\n| Name | Role |\n| --- | --- |\n| Ada | Lead |\n${row.fence}`;
+    await options.deliver(
+      { text: `<div>\n${sample}\n</div>`, isReasoning: true },
+      { kind: "final" },
+    );
+    await options.onIdle?.();
+
+    expect(requireStreamingInstance(0).closeWithResult.mock.calls[0]?.[0]).toBe(
+      `Thinking\n\n_<div>_\n${sample}\n_</div>_`,
+    );
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+  });
+
   // Only a projection answers to the limit. Text the author wrote long streams the way it
   // always has, beside reasoning that was never converted.
   it("still previews an authored body that is past the limit", async () => {

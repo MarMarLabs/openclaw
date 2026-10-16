@@ -15,6 +15,11 @@ describe("formatReasoningPreservingStructure fences", () => {
     { shape: "a fence that was never closed", fence: "~~~\nplain sample" },
     { shape: "a fence an info line does not close", fence: "```\n```js\nplain sample\n```" },
     { shape: "a fence opened behind a list marker", fence: "- ~~~\n  plain sample\n  ~~~" },
+    {
+      shape: "an indented sample holding fence markers",
+      fence: "    ```\n    plain sample\n    ```",
+    },
+    { shape: "an indented sample", fence: "    plain sample\n    more sample" },
   ])("leaves $shape as written", ({ fence }) => {
     expect(formatReasoningPreservingStructure(`Checking.\n\n${fence}`)).toBe(
       `Thinking\n\n_Checking._\n\n${fence}`,
@@ -34,6 +39,14 @@ describe("formatReasoningPreservingStructure fences", () => {
     expect(formatReasoningPreservingStructure(text)).toBe(
       `Thinking\n\n_${prose}_\n\n${fence.join("\n\n")}`,
     );
+  });
+
+  // Table conversion and routing read Markdown with HTML off, where a tag line is plain text and
+  // cannot take the fence after it. Only the tag lines are prose here.
+  it.each(["```", "~~~"])("keeps a %s fence that follows an HTML tag line", (fence) => {
+    expect(
+      formatReasoningPreservingStructure(`<div>\n${fence}\nplain sample\n${fence}\n</div>`),
+    ).toBe(`Thinking\n\n_<div>_\n${fence}\nplain sample\n${fence}\n_</div>_`);
   });
 
   // A quote that starts beside a fenced list item ends the fence nothing closed. The parser puts

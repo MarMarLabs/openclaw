@@ -1,7 +1,7 @@
 // Feishu plugin module keeps streamed and delivered reasoning readable once a table mode has
 // produced structure inside it.
 import { formatReasoningMessage } from "openclaw/plugin-sdk/agent-runtime";
-import { fencedCodeLines } from "./markdown.js";
+import { codeBlockLines } from "./markdown.js";
 
 // A line the renderer has to recognize as structure. A table row is any line
 // carrying a cell separator, not only one that opens with a pipe, because the
@@ -11,8 +11,8 @@ import { fencedCodeLines } from "./markdown.js";
 // destroys a delimiter row and with it the table.
 // A quoted table keeps its prefix through conversion, so the list marker the mode
 // produces arrives behind one, and a pattern anchored at the line start reads it as
-// prose and underscores it away. Fences are not read here: the parser that later decides
-// what is a table says which lines sit in one, whichever character opened it.
+// prose and underscores it away. Code blocks are not read here: a parser that agrees with
+// the one that later decides what is a table says which lines sit in one.
 const isReasoningStructureLine = (line: string): boolean =>
   line.includes("|") ||
   /^\s*(?:>\s*)*(?:[-*+\u2022]\s|\d+[.)]\s)/u.test(line) ||
@@ -27,12 +27,12 @@ const isReasoningStructureLine = (line: string): boolean =>
 export function formatReasoningPreservingStructure(text: string): string {
   const trimmed = text.trim();
   const lines = trimmed.split("\n");
-  const fenced = fencedCodeLines(trimmed);
-  if (!trimmed || (fenced.size === 0 && !lines.some(isReasoningStructureLine))) {
+  const code = codeBlockLines(trimmed);
+  if (!trimmed || (code.size === 0 && !lines.some(isReasoningStructureLine))) {
     return formatReasoningMessage(text);
   }
   const formatted = lines.map((line, index) =>
-    fenced.has(index) || !line || isReasoningStructureLine(line) ? line : `_${line}_`,
+    code.has(index) || !line || isReasoningStructureLine(line) ? line : `_${line}_`,
   );
   return `Thinking\n\n${formatted.join("\n")}`;
 }
