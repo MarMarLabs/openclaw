@@ -72,14 +72,34 @@ function fencesBalance(chunk: string): boolean {
  */
 export function fencedCodeLines(text: string): Set<number> {
   const lines = new Set<number>();
-  if (!text.split("\n").some(isFenceMarkerLine)) {
+  // The parser ends a line at a lone carriage return too, so the marker prefilter does as well.
+  if (!text.split(/\r\n|\r|\n/u).some(isFenceMarkerLine)) {
     return lines;
   }
+  // Lines are counted from offsets. The parser's own line numbers also count a lone carriage
+  // return, and a block its container ends stops at the start of the next line.
+  const feeds: number[] = [];
+  for (let at = text.indexOf("\n"); at >= 0; at = text.indexOf("\n", at + 1)) {
+    feeds.push(at);
+  }
+  const lineAt = (offset: number) => {
+    let low = 0;
+    let high = feeds.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if ((feeds[middle] ?? offset) < offset) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low;
+  };
   for (const code of fencedCode(text).keys()) {
-    const first = code.position?.start.line ?? 1;
-    const last = code.position?.end.line ?? first;
-    for (let line = first; line <= last; line += 1) {
-      lines.add(line - 1);
+    const start = code.position?.start.offset ?? 0;
+    const last = lineAt(Math.max(start, (code.position?.end.offset ?? text.length) - 1));
+    for (let line = lineAt(start); line <= last; line += 1) {
+      lines.add(line);
     }
   }
   return lines;

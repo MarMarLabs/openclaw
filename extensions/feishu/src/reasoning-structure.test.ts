@@ -13,9 +13,41 @@ describe("formatReasoningPreservingStructure fences", () => {
     { shape: "a tilde fence closed by a longer marker", fence: "~~~\nplain sample\n~~~~~" },
     { shape: "a fence behind a quote", fence: "> ~~~\n> plain sample\n> ~~~" },
     { shape: "a fence that was never closed", fence: "~~~\nplain sample" },
+    { shape: "a fence an info line does not close", fence: "```\n```js\nplain sample\n```" },
+    { shape: "a fence opened behind a list marker", fence: "- ~~~\n  plain sample\n  ~~~" },
   ])("leaves $shape as written", ({ fence }) => {
     expect(formatReasoningPreservingStructure(`Checking.\n\n${fence}`)).toBe(
       `Thinking\n\n_Checking._\n\n${fence}`,
+    );
+  });
+
+  // The formatter reads the trimmed text, and a lone carriage return is a line ending to the
+  // parser but not to the split, so the lines must still line up in both cases.
+  it.each([
+    { shape: "leading blank lines", text: "\n\nChecking.\n\n~~~\nplain sample\n~~~" },
+    {
+      shape: "a lone carriage return",
+      text: "Checking.\rStill checking.\n\n```\nplain sample\n```",
+    },
+  ])("keeps the markers after $shape", ({ text }) => {
+    const [prose, ...fence] = text.trim().split("\n\n");
+    expect(formatReasoningPreservingStructure(text)).toBe(
+      `Thinking\n\n_${prose}_\n\n${fence.join("\n\n")}`,
+    );
+  });
+
+  // A quote that starts beside a fenced list item ends the fence nothing closed. The parser puts
+  // the end of that block at the start of the quote's line, which is prose.
+  it("italicises a quote that ends an unclosed fence in a list item", () => {
+    expect(formatReasoningPreservingStructure("- ~~~\n  plain sample\n> Back to prose.")).toBe(
+      "Thinking\n\n- ~~~\n  plain sample\n_> Back to prose._",
+    );
+  });
+
+  // Every marker here follows a lone carriage return, so no line the split sees starts with one.
+  it("finds a fence whose markers all follow a lone carriage return", () => {
+    expect(formatReasoningPreservingStructure("Checking.\r~~~\nplain sample\r~~~")).toContain(
+      "\nplain sample\r~~~",
     );
   });
 
