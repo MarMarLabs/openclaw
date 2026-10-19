@@ -103,20 +103,8 @@ vi.mock("./typing.js", async (importOriginal) => ({
   removeTypingIndicator: removeTypingIndicatorMock,
 }));
 vi.mock("./streaming-card.js", async (importOriginal) => {
-  class FeishuStreamingFinalizationError extends Error {
-    result: { visibleReplySent: boolean; content?: string; messageId?: string };
-
-    constructor(
-      cause: unknown,
-      result: { visibleReplySent: boolean; content?: string; messageId?: string },
-    ) {
-      super(cause instanceof Error ? cause.message : String(cause), { cause });
-      this.result = result;
-    }
-  }
   return {
     ...(await importOriginal<typeof import("./streaming-card.js")>()),
-    FeishuStreamingFinalizationError,
     FeishuStreamingSession: class {
       active = false;
       credentials: unknown;
@@ -129,11 +117,12 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
       });
       closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
         this.active = false;
-        return {
+        return createFeishuReplyDeliveryResult({
+          results: [{ messageId: "om_stream" }],
           visibleReplySent: Boolean(text?.trim()),
           ...(text?.trim() ? { content: text } : {}),
-          messageId: "om_stream",
-        };
+          kind: "card",
+        });
       });
       discard = vi.fn<FeishuStreamingSession["discard"]>(async () => {
         this.active = false;
@@ -149,6 +138,7 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
   };
 });
 
+import { createFeishuReplyDeliveryResult } from "./reply-delivery-result.js";
 import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
 import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
 
@@ -514,7 +504,14 @@ describe("createFeishuReplyDispatcher table limits", () => {
 
       const delivery = await options.deliver({ text }, { kind: "final" });
       resolveDiscard({ visibleReplySent: false, content: "" });
-      resolveClose({ visibleReplySent: true, content: text, messageId: "om-table-card" });
+      resolveClose(
+        createFeishuReplyDeliveryResult({
+          results: [{ messageId: "om-table-card" }],
+          visibleReplySent: true,
+          content: text,
+          kind: "card",
+        }),
+      );
       await idle;
 
       expect(instance.closeWithResult).not.toHaveBeenCalled();
@@ -555,7 +552,14 @@ describe("createFeishuReplyDispatcher table limits", () => {
       const committed = String(instance.closeWithResult.mock.calls[0]?.[0]);
 
       const delivery = await options.deliver({ text: tableMarkdown }, { kind: "final" });
-      resolveClose({ visibleReplySent: true, content: committed, messageId: "om-table" });
+      resolveClose(
+        createFeishuReplyDeliveryResult({
+          results: [{ messageId: "om-table" }],
+          visibleReplySent: true,
+          content: committed,
+          kind: "card",
+        }),
+      );
       await idle;
 
       expect(committed).not.toBe(tableMarkdown);

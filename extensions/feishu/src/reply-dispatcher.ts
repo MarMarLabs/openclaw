@@ -46,11 +46,7 @@ import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js
 import { createFeishuReplySenders } from "./reply-senders.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { chunkFeishuCardMarkdown, sendCardFeishu } from "./send.js";
-import {
-  FeishuStreamingFinalizationError,
-  FeishuStreamingSession,
-  mergeStreamingText,
-} from "./streaming-card.js";
+import { FeishuStreamingSession, mergeStreamingText } from "./streaming-card.js";
 import { projectFeishuStreamingCardText, queueFeishuStreamingUpdate } from "./streaming-update.js";
 import { createFeishuTableRouting } from "./table-routing.js";
 import { resolveReceiveIdType } from "./targets.js";
@@ -550,7 +546,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           authoredAnswer: finalizedAnswerText,
           combine: buildCombinedStreamText,
         });
-        let closed;
+        let closed: FeishuReplyDeliveryResult;
         try {
           if (disposition === "discarded" || closeNeedsPost) {
             closed = await streamingToClose.discard();
@@ -559,10 +555,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             closed = await streamingToClose.closeWithResult(text, { note: finalNote });
           }
         } catch (error: unknown) {
-          if (!(error instanceof FeishuStreamingFinalizationError)) {
+          if (!isChannelPartialDeliveryError(error)) {
             throw error;
           }
-          closed = error.result;
+          closed = error.deliveryResult;
           finalizationError = error;
         }
         // A failed discard reports its rejected empty clear, not the answer. The card keeps the
@@ -570,16 +566,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         const answerKeptOnCard =
           closeNeedsPost &&
           closed.content?.startsWith(projectFeishuStreamingCardText(text, tableMode)) === true;
+        const { finalTextAccepted, ...closedResult } = closed;
         result = {
-          ...createFeishuReplyDeliveryResult({
-            results: [closed],
-            visibleReplySent: closed.visibleReplySent,
-            content: closed.content,
-            kind: "card",
-          }),
-          ...(closed.finalTextAccepted === false && !answerKeptOnCard
-            ? { finalTextAccepted: false }
-            : {}),
+          ...closedResult,
+          ...(finalTextAccepted === false && !answerKeptOnCard ? { finalTextAccepted: false } : {}),
         };
         // A failed removal can leave the card visible, so only a clean discard hands
         // the text to a post instead.
@@ -611,15 +601,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           (finalizationError === undefined || result.content === text)
         ) {
           deliveredFinalTexts.add(answerText);
-        }
-        if (
-          finalizationError instanceof FeishuStreamingFinalizationError &&
-          result.visibleReplySent
-        ) {
-          finalizationError = createFeishuPartialReplyDeliveryError(
-            finalizationError.cause ?? finalizationError,
-            result,
-          );
         }
       }
       return {
@@ -847,9 +828,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             if (deliveryError !== undefined) {
               completion.reject(
                 createFeishuPartialReplyDeliveryError(
-                  (isChannelPartialDeliveryError(deliveryError) &&
-                    deliveryError instanceof Error) ||
-                    deliveryError instanceof FeishuStreamingFinalizationError
+                  isChannelPartialDeliveryError(deliveryError) && deliveryError instanceof Error
                     ? (deliveryError.cause ?? deliveryError)
                     : deliveryError,
                   settledResult,
@@ -946,7 +925,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       ? new AggregateError(
           [
             mediaCause,
-            finalizationError instanceof Error
+            finalizationError instanceof Error &&
+            (isChannelPartialDeliveryError(finalizationError) || settlement.error === undefined)
               ? (finalizationError.cause ?? finalizationError)
               : finalizationError,
           ],

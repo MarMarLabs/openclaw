@@ -49,7 +49,6 @@ import type {
   OpenClawDatabaseSchemaPreflight,
   OpenClawDatabasePreflightOptions,
 } from "./openclaw-database-preflight.types.js";
-import { requestOpenClawAgentDatabaseIntegrityCheck } from "./openclaw-database-verify.js";
 import {
   OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
   OPENCLAW_STATE_SCHEMA_VERSION,
@@ -84,6 +83,7 @@ export async function assertOpenClawDatabasesReady(
   options: {
     env: NodeJS.ProcessEnv;
     onAgentInspection?: (stats: AgentDatabasePreflightStats) => void;
+    onRegisteredAgentDatabases?: OpenClawDatabasePreflightOptions["onRegisteredAgentDatabases"];
   } & (
     | {
         operation: "doctor";
@@ -100,6 +100,7 @@ export async function assertOpenClawDatabasesReady(
     {
       env: options.env,
       onAgentInspection: options.onAgentInspection,
+      onRegisteredAgentDatabases: options.onRegisteredAgentDatabases,
       verifyCurrentSchemaShape: true,
       ...(options.config
         ? {
@@ -314,10 +315,9 @@ export async function preflightOpenClawDatabaseSchemas(
             // Boot admission exposes this native handle to its enclosing migration owner.
             stateDatabase = openNodeSqliteDatabase(
               cleanClose ? resolveImmutableSqliteFileUri(stateLocation) : stateLocation,
-              { readOnly: true },
+              { readOnly: true, timeout: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS },
             );
             closeStateSchemaReadAdmission = options.openStateSchemaReadAdmission?.(stateDatabase);
-            stateDatabase.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
             const admittedDatabase = stateDatabase;
             assertStateSource?.();
             inspection = assertStateSource
@@ -608,16 +608,6 @@ export async function preflightOpenClawDatabaseSchemas(
             inspection.incompatible.push(incompatible);
           }
         }
-        if (
-          schemaInspection.integrityGateOutcome === "cached" &&
-          !readSqliteDatabaseCleanClose(agentPath)
-        ) {
-          requestOpenClawAgentDatabaseIntegrityCheck({
-            check: "quick",
-            path: agentPath,
-            env: options.env ?? process.env,
-          });
-        }
         recordPreparedSchemaHeader?.(schemaInspection);
         return schemaInspection.preparationPending ? "defer" : undefined;
       } catch (error) {
@@ -681,5 +671,6 @@ export async function preflightOpenClawDatabaseSchemas(
     options.onAgentDatabaseDiscovery?.(preparedDiscovery);
   }
   options.onAgentInspection?.(stats);
+  options.onRegisteredAgentDatabases?.(registeredDatabases);
   return result;
 }

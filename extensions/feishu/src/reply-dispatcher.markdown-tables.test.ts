@@ -130,20 +130,8 @@ vi.mock("./typing.js", async (importOriginal) => ({
   removeTypingIndicator: removeTypingIndicatorMock,
 }));
 vi.mock("./streaming-card.js", async (importOriginal) => {
-  class FeishuStreamingFinalizationError extends Error {
-    result: { visibleReplySent: boolean; content?: string; messageId?: string };
-
-    constructor(
-      cause: unknown,
-      result: { visibleReplySent: boolean; content?: string; messageId?: string },
-    ) {
-      super(cause instanceof Error ? cause.message : String(cause), { cause });
-      this.result = result;
-    }
-  }
   return {
     ...(await importOriginal<typeof import("./streaming-card.js")>()),
-    FeishuStreamingFinalizationError,
     mergeStreamingText,
     FeishuStreamingSession: class {
       active = false;
@@ -157,11 +145,12 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
       });
       closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
         this.active = false;
-        return {
+        return createFeishuReplyDeliveryResult({
+          results: [{ messageId: "om_stream" }],
           visibleReplySent: Boolean(text?.trim()),
           ...(text?.trim() ? { content: text } : {}),
-          messageId: "om_stream",
-        };
+          kind: "card",
+        });
       });
       discard = vi.fn<FeishuStreamingSession["discard"]>(async () => {
         this.active = false;
@@ -177,9 +166,13 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
   };
 });
 
+import {
+  createFeishuPartialReplyDeliveryError,
+  createFeishuReplyDeliveryResult,
+} from "./reply-delivery-result.js";
 import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
 import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
-import { FeishuStreamingFinalizationError, type FeishuStreamingSession } from "./streaming-card.js";
+import type { FeishuStreamingSession } from "./streaming-card.js";
 
 afterAll(() => {
   vi.doUnmock("./accounts.js");
@@ -1031,10 +1024,13 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
     const instance = requireStreamingInstance(0);
     const kept = () => String(instance.update.mock.calls.at(row.update)?.[0]);
     instance.discard.mockImplementationOnce(async () => {
-      throw new FeishuStreamingFinalizationError(new Error("delete and clear rejected"), {
-        visibleReplySent: true,
-        content: kept(),
-        messageId: "om_stream",
+      throw createFeishuPartialReplyDeliveryError(new Error("delete and clear rejected"), {
+        ...createFeishuReplyDeliveryResult({
+          results: [{ messageId: "om_stream" }],
+          visibleReplySent: true,
+          content: kept(),
+          kind: "card",
+        }),
         finalTextAccepted: false,
       });
     });

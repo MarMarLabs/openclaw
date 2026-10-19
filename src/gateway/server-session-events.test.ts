@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionTranscriptProjectionUnavailableError } from "../config/sessions/session-transcript-projection-error.js";
+import { createDeferred, withinTest } from "../../test/helpers/promise.js";
 import { registerTranscriptMarkerQueueTests } from "./server-session-events.marker-queue.test-support.js";
 import {
   createGatewayBroadcaster,
@@ -16,7 +16,6 @@ import {
   projectChatDisplayMessageMock,
   readSessionMessageByIdAsyncMock,
   readSessionMessageCountAsyncMock,
-  resolveEmbeddedAgentSessionProgressStateMock,
   runtimeConfigState,
   sessionRow,
   storedMessage,
@@ -27,7 +26,6 @@ import { GatewayClientRegistry } from "./server/client-registry.js";
 describe("createTranscriptUpdateBroadcastHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    resolveEmbeddedAgentSessionProgressStateMock.mockReturnValue(undefined);
     listAccessorSessionEntriesReadOnlyMock.mockReturnValue([]);
     loadAccessorSessionEntryReadOnlyMock.mockReturnValue(undefined);
     loadGatewaySessionEntryReadOnlyMock.mockReturnValue({ entry: undefined, storePath: "" });
@@ -39,6 +37,123 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
     runtimeConfigState.value = {};
     sessionRow.key = "agent:main:main";
     sessionRow.thinkingLevel = "ultra";
+  });
+
+  it("bounds queued presentation behind a held canonical read and invalidates history", async ({
+    signal,
+  }) => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    readSessionMessageByIdAsyncMock.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return storedMessage("executing");
+    });
+    loadAccessorSessionEntryReadOnlyMock.mockReturnValue({
+      sessionId: "sess-main",
+      lifecycleRevision: "current",
+      updatedAt: 1,
+    });
+    const { broadcastToConnIds, handler } = createHandler(false, true, () => new Set(["targeted"]));
+    const update = (messageId: string) => ({
+      target: {
+        agentId: "main",
+        sessionId: "sess-main",
+        sessionKey: "agent:main:main",
+        storePath: "/tmp/saturated.sqlite",
+      },
+      lifecycleRevision: "current",
+      messageId,
+      message: { role: "user", content: messageId },
+    });
+    const executing = handler(update("executing"));
+    await withinTest(entered.promise, signal);
+    const pending = Array.from({ length: 1000 }, (_, index) => handler(update(String(index))));
+    let settled = false;
+    void pending[0]!.then(() => {
+      settled = true;
+    });
+    try {
+      // Admission shares a pending publication, not a promise chain per notification.
+      expect(new Set(pending).size).toBe(1);
+      expect(settled).toBe(false);
+      const independent = handler({
+        sessionKey: "agent:main:independent",
+        messageId: "independent",
+        messageSeq: 1,
+        message: { role: "user", content: "independent" },
+      });
+      await withinTest(independent, signal);
+      expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+      release.resolve();
+      const [executed, ...collapsed] = await withinTest(
+        Promise.all([executing, ...pending]),
+        signal,
+      );
+      expect(executed).toBeUndefined();
+      expect(collapsed.every((result) => result === false)).toBe(true);
+      expect(readSessionMessageByIdAsyncMock).toHaveBeenCalledOnce();
+      expect(broadcastToConnIds.mock.calls.map(([event]) => event)).toEqual([
+        "session.message",
+        "session.message",
+        "sessions.changed",
+      ]);
+      expect(broadcastToConnIds.mock.calls[2]?.[2]).toEqual(new Set(["conn-1", "targeted"]));
+      expect(broadcastToConnIds.mock.calls[2]?.[1]).not.toHaveProperty("messageId");
+    } finally {
+      release.resolve();
+      await Promise.allSettled([executing, ...pending]);
+    }
+  });
+
+  it("keeps saturated resets separate across same-id lifecycle replacement", async ({ signal }) => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    let lifecycleRevision = "before";
+    loadAccessorSessionEntryReadOnlyMock.mockImplementation(() => ({
+      sessionId: "sess-main",
+      lifecycleRevision,
+      updatedAt: 1,
+    }));
+    readSessionMessageByIdAsyncMock.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return storedMessage("executing");
+    });
+    const { handler, broadcastToConnIds } = createHandler(false);
+    const update = (messageId: string) => ({
+      target: {
+        agentId: "main",
+        sessionId: "sess-main",
+        sessionKey: "agent:main:main",
+        storePath: "/tmp/replaced.sqlite",
+      },
+      lifecycleRevision,
+      messageId,
+      message: { role: "user", content: messageId },
+    });
+    const executing = handler(update("executing"));
+    await withinTest(entered.promise, signal);
+    const before = handler(update("before-1"));
+    expect(handler(update("before-2"))).toBe(before);
+    lifecycleRevision = "after";
+    const after = handler(update("after-1"));
+    expect(handler(update("after-2"))).toBe(after);
+    expect(after).not.toBe(before);
+    try {
+      release.resolve();
+      await withinTest(Promise.all([executing, before, after]), signal);
+      expect(readSessionMessageByIdAsyncMock).toHaveBeenCalledOnce();
+      expect(broadcastToConnIds).toHaveBeenCalledExactlyOnceWith(
+        "sessions.changed",
+        expect.objectContaining({ sessionKey: "agent:main:main", phase: "message" }),
+        expect.any(Set),
+        expect.objectContaining({ prepareSessionProjection: expect.any(Function) }),
+      );
+    } finally {
+      release.resolve();
+      await Promise.allSettled([executing, before, after]);
+    }
   });
 
   it("reads canonical content and placement from one selected snapshot", async () => {
@@ -80,49 +195,6 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
     );
   });
 
-  it.each(["missing", "rebuilding", "quoted reply"])(
-    "invalidates broad and targeted history when the committed row needs page reconciliation: %s",
-    async (kind) => {
-      if (kind === "missing") {
-        readSessionMessageByIdAsyncMock.mockResolvedValueOnce({ found: false, oversized: false });
-      } else if (kind === "quoted reply") {
-        readSessionMessageByIdAsyncMock.mockResolvedValueOnce({
-          found: true,
-          oversized: false,
-          seq: 2,
-          message: { role: "user", content: "Quoted reply", __openclaw: { replyToId: "original" } },
-        });
-      } else {
-        readSessionMessageByIdAsyncMock.mockRejectedValueOnce(
-          new SessionTranscriptProjectionUnavailableError("sess-main"),
-        );
-      }
-      const { broadcastToConnIds, handler } = createHandler(
-        false,
-        true,
-        () => new Set(["targeted"]),
-      );
-      await handler({
-        target: {
-          agentId: "main",
-          sessionId: "sess-main",
-          sessionKey: "agent:main:main",
-          storePath: "/tmp/canonical-update.sqlite",
-        },
-        messageId: "removed-id",
-        message: { role: "assistant", content: "stale queued content" },
-      });
-      expect(broadcastToConnIds).toHaveBeenCalledExactlyOnceWith(
-        "sessions.changed",
-        expect.objectContaining({ sessionKey: "agent:main:main", phase: "message" }),
-        new Set(["conn-1", "targeted"]),
-        expect.objectContaining({ prepareSessionProjection: expect.any(Function) }),
-      );
-      expect(broadcastToConnIds.mock.calls[0]?.[1]).not.toHaveProperty("message");
-      expect(readSessionMessageCountAsyncMock).not.toHaveBeenCalled();
-    },
-  );
-
   it("never silently drops an authoritative session message for a slow subscriber", async () => {
     const { broadcastToConnIds, handler } = createHandler(false);
 
@@ -163,7 +235,6 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
       broadcastToConnIds,
       sessionEventSubscribers: { getAll: () => broadConnIds },
       sessionMessageSubscribers: { get: getSessionMessageSubscribers },
-      chatAbortControllers: new Map(),
     });
 
     await handler({
@@ -478,12 +549,12 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
     );
   });
 
-  it("projects running status into ordinary startup transcript snapshots", async () => {
+  it("does not project a prepared source as a running startup transcript", async () => {
     await expect(emitAssistantTranscriptUpdate(true, undefined, false)).resolves.toMatchObject({
       sessionKey: "agent:main:main",
-      status: "running",
-      hasActiveRun: true,
-      session: { key: "agent:main:main", status: "running", hasActiveRun: true },
+      status: "done",
+      hasActiveRun: false,
+      session: { key: "agent:main:main", status: "done", hasActiveRun: false },
     });
   });
 
@@ -522,28 +593,6 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
     });
   });
 
-  it("keeps transcript snapshots active for embedded or channel reply runs", async () => {
-    resolveEmbeddedAgentSessionProgressStateMock.mockImplementation((sessionId) =>
-      sessionId === "sess-main" ? "running" : undefined,
-    );
-
-    await expect(emitAssistantTranscriptUpdate(false)).resolves.toMatchObject({
-      sessionKey: "agent:main:main",
-      hasActiveRun: true,
-      activeRunIds: null,
-      session: {
-        key: "agent:main:main",
-        sessionId: "sess-main",
-        hasActiveRun: true,
-        activeRunIds: null,
-      },
-    });
-    expect(resolveEmbeddedAgentSessionProgressStateMock).toHaveBeenCalledWith(
-      "sess-main",
-      expect.objectContaining({ agentId: "main" }),
-    );
-  });
-
   it.each([
     { name: "routes the configured persisted owner without publishing its goal" },
     { name: "publishes the explicit owner's identity and goal", agentId: "ops" },
@@ -564,7 +613,6 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
       broadcastToConnIds,
       sessionEventSubscribers: { getAll: () => new Set<string>() },
       sessionMessageSubscribers: { get: getSessionMessageSubscribers },
-      chatAbortControllers: new Map(),
     });
 
     await handler({
@@ -630,6 +678,7 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
         agentId: "ops",
         dropIfSlow: true,
         sessionKeys: ["agent:ops:global"],
+        sessionEventSubscriptionKeys: ["agent:ops:global"],
       },
     );
     expectPrivateSessionInvalidation(broadcastToConnIds.mock.calls[0]?.[1]);
@@ -674,7 +723,6 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
       broadcastToConnIds,
       sessionEventSubscribers: { getAll: () => new Set() },
       sessionMessageSubscribers: { get: () => new Set() },
-      chatAbortControllers: new Map(),
     });
     projectChatDisplayMessageMock.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined);
 

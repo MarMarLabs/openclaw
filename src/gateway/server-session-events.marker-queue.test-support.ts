@@ -107,10 +107,9 @@ export function registerTranscriptMarkerQueueTests() {
       broadcastToConnIds,
       sessionEventSubscribers: { getAll: () => new Set(["conn-1"]) },
       sessionMessageSubscribers: { get: () => new Set<string>() },
-      chatAbortControllers: new Map(),
       getSessionRowProjection: () => projection,
     });
-    const tasks: Promise<void>[] = [];
+    const tasks: ReturnType<typeof handler>[] = [];
     const publications = () =>
       broadcastToConnIds.mock.calls.map(([name, payload]) => [
         name,

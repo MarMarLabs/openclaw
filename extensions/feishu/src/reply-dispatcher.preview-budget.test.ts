@@ -102,20 +102,8 @@ vi.mock("./typing.js", async (importOriginal) => ({
   removeTypingIndicator: removeTypingIndicatorMock,
 }));
 vi.mock("./streaming-card.js", async (importOriginal) => {
-  class FeishuStreamingFinalizationError extends Error {
-    result: { visibleReplySent: boolean; content?: string; messageId?: string };
-
-    constructor(
-      cause: unknown,
-      result: { visibleReplySent: boolean; content?: string; messageId?: string },
-    ) {
-      super(cause instanceof Error ? cause.message : String(cause), { cause });
-      this.result = result;
-    }
-  }
   return {
     ...(await importOriginal<typeof import("./streaming-card.js")>()),
-    FeishuStreamingFinalizationError,
     FeishuStreamingSession: class {
       active = false;
       credentials: unknown;
@@ -128,11 +116,12 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
       });
       closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
         this.active = false;
-        return {
+        return createFeishuReplyDeliveryResult({
+          results: [{ messageId: "om_stream" }],
           visibleReplySent: Boolean(text?.trim()),
           ...(text?.trim() ? { content: text } : {}),
-          messageId: "om_stream",
-        };
+          kind: "card",
+        });
       });
       discard = vi.fn<FeishuStreamingSession["discard"]>(async () => {
         this.active = false;
@@ -148,6 +137,7 @@ vi.mock("./streaming-card.js", async (importOriginal) => {
   };
 });
 
+import { createFeishuReplyDeliveryResult } from "./reply-delivery-result.js";
 import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
 import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
 
