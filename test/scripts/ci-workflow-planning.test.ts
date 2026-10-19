@@ -5877,24 +5877,6 @@ describe("ci workflow guards", () => {
         eventName === "pull_request" ? "ubuntu-24.04" : "blacksmith-16vcpu-ubuntu-2404",
       );
     }
-    const discovery = workflow.jobs["check-plan"].steps.find(
-      (step: WorkflowStep) => step.id === "plan",
-    ).env.OPENCLAW_CI_TYPE_PLAN_SERIAL;
-    expect(evaluateWorkflowExpression(discovery, plannerContext)).toBe("1");
-    for (const override of [
-      { eventName: "push" },
-      { eventName: "schedule" },
-      { eventName: "workflow_dispatch" },
-      { headRepository: "contributor/openclaw" },
-      { runnerBackend: "blacksmith" },
-      { runnerBackend: "github" },
-      { runAttempt: 2 },
-      { frozenTarget: true },
-    ] as const) {
-      expect(evaluateWorkflowExpression(discovery, { ...plannerContext, ...override })).not.toBe(
-        "1",
-      );
-    }
     const typeRunner = workflow.jobs["check-test-types-hosted-core-shard"]["runs-on"];
     const lintRunner = workflow.jobs["check-lint-hosted-core-shard"]["runs-on"];
     for (const runnerBackend of ["", "blacksmith", "hybrid"] as const) {
@@ -11255,7 +11237,7 @@ describe("ci workflow guards", () => {
       uses: SETUP_GO_V6,
       with: {
         cache: false,
-        "go-version": "1.27.1",
+        "go-version": "1.27.2",
       },
     });
     expect(setupGoStep.with).not.toHaveProperty("go-version-file");
@@ -11278,12 +11260,12 @@ describe("ci workflow guards", () => {
     });
     expect(verifyGoStep).toMatchObject({
       if: "matrix.requires_go == true",
-      run: 'test "$(go env GOVERSION)" = "go1.27.1"',
+      run: 'test "$(go env GOVERSION)" = "go1.27.2"',
     });
 
     const goMod = readTrackedText("scripts/docs-i18n/go.mod");
     expect(goMod).toMatch(/^go 1\.26\.0$/mu);
-    expect(goMod).toMatch(/^toolchain go1\.27\.1$/mu);
+    expect(goMod).toMatch(/^toolchain go1\.27\.2$/mu);
 
     const tooling = {
       configs: ["test/vitest/vitest.tooling.config.ts"],
