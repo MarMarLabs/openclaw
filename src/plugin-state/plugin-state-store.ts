@@ -8,6 +8,7 @@ import { warnPluginSdkDeprecation } from "../plugins/sdk-deprecation.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { validatePluginStateComparison } from "./plugin-state-observation.js";
+import { PluginStateRuntimeInactiveError } from "./plugin-state-operation-error.js";
 import { createPluginStateOperation } from "./plugin-state-operation.js";
 import { assertPluginStatePublicationSettled } from "./plugin-state-publication.js";
 import {
@@ -448,15 +449,22 @@ export function createPluginStateRuntimeStores(
   if (pluginId.startsWith("core:")) {
     throw invalidInput("Plugin ids starting with 'core:' are reserved for core consumers.", "open");
   }
+  const assertActive = () => {
+    try {
+      assertRuntimeCurrent();
+    } catch (error) {
+      throw new PluginStateRuntimeInactiveError(error);
+    }
+  };
   return {
     openKeyedStore: <T>(options: OpenAsyncKeyedStoreOptions) => {
       if (options.retention === "retained") {
-        assertRuntimeCurrent();
+        assertActive();
       }
       return createKeyedStoreForPluginId<T>(
         pluginId,
         options,
-        assertRuntimeCurrent,
+        assertActive,
         captureModuleSource?.(),
         pluginId,
       );
@@ -470,7 +478,7 @@ export function createPluginStateRuntimeStores(
         options,
         {
           assertCurrent: () => {
-            assertRuntimeCurrent();
+            assertActive();
             authority?.assertCurrent();
           },
           sessionEntryCurrent: authority?.sessionEntryCurrent,
@@ -478,20 +486,14 @@ export function createPluginStateRuntimeStores(
         captureModuleSource?.(),
       ),
     openSyncKeyedStore: <T>(options: OpenKeyedStoreOptions) => {
-      assertRuntimeCurrent();
+      assertActive();
       warnPluginSdkDeprecation({
         pluginId,
         family: "plugin-state-keyed-store",
         method: "api.runtime.state.openSyncKeyedStore",
         replacement: "api.runtime.state.openKeyedStoreV2 and await its operations",
       });
-      return createSyncKeyedStoreForPluginId<T>(
-        pluginId,
-        options,
-        true,
-        pluginId,
-        assertRuntimeCurrent,
-      );
+      return createSyncKeyedStoreForPluginId<T>(pluginId, options, true, pluginId, assertActive);
     },
   };
 }

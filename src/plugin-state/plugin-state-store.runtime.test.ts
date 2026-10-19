@@ -29,6 +29,10 @@ import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { resetPluginBlobStoreForTests } from "./plugin-blob-store.js";
 import { stateTest } from "./plugin-state-fixtures.test-support.js";
 import {
+  isPluginStateRuntimeInactiveError,
+  PluginStateRuntimeInactiveError,
+} from "./plugin-state-operation-error.js";
+import {
   createPluginStateKeyedStore,
   createPluginStateKeyedStoreV2,
   createPluginStateRuntimeStores,
@@ -549,7 +553,7 @@ describe("plugin-state-store.runtime", () => {
         delete: () => store.delete("retained"),
         clear: () => store.clear(),
       };
-      expect(mutations[operation]).toThrow('Plugin "sync-owner" runtime is no longer active');
+      expect(mutations[operation]).toThrow(PluginStateRuntimeInactiveError);
       expect(store.entries()).toEqual(snapshot);
       expect(() => runtime.openSyncKeyedStore(keyedOptions)).toThrow(
         'Plugin "sync-owner" runtime is no longer active',
@@ -574,6 +578,53 @@ describe("plugin-state-store.runtime", () => {
       };
       expect(mutations[operation]).toThrow();
       expect(store.entries()).toEqual(snapshot);
+    },
+  );
+
+  it.for(["open", "commit"] as const)(
+    "identifies V2 runtime refusal at %s without classifying storage errors",
+    async (stage, { state: _state }) => {
+      const { record, registry, runtime } = setup("state-owner", "config", true);
+      const store = runtime.openKeyedStoreV2<number>(keyedOptions);
+      await store.register("retained", 1);
+      if (stage === "open") {
+        revokePluginRecord(registry.registry, record);
+      }
+      const admission =
+        stage === "commit"
+          ? probe.admission(mutationAdmission, (request, grant, admit) => {
+              if (request.stage === "commit") {
+                revokePluginRecord(registry.registry, record);
+              }
+              admit(request, grant);
+            })
+          : undefined;
+      try {
+        let failure: unknown;
+        try {
+          if (stage === "open") {
+            runtime.openKeyedStoreV2(keyedOptions);
+          } else {
+            await store.register("retained", 2);
+          }
+        } catch (error) {
+          failure = error;
+        }
+        expect(isPluginStateRuntimeInactiveError(failure), JSON.stringify(failure)).toBe(true);
+        if (stage === "commit") {
+          expect(failure).toMatchObject({ code: "PLUGIN_STATE_WRITE_FAILED" });
+        }
+        expect(
+          isPluginStateRuntimeInactiveError(
+            new Error('Plugin "state-owner" runtime is no longer active.'),
+          ),
+        ).toBe(false);
+        expect(
+          await createPluginStateKeyedStore<number>("state-owner", keyedOptions).lookup("retained"),
+        ).toBe(1);
+      } finally {
+        admission?.mockRestore();
+      }
     },
   );
 

@@ -1,4 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { getSessionBindingService } from "openclaw/plugin-sdk/conversation-runtime";
 import {
   createPluginStateKeyedStoreV2ForTests,
@@ -6,6 +7,8 @@ import {
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { readGlobalSingleton } from "../shared/global-singleton.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { loadBundledPluginFacade } from "../test-utils/bundled-plugin-public-surface.js";
 import {
   bindConversationNow,
@@ -14,7 +17,11 @@ import {
 } from "./conversation-binding.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { PluginInstance } from "./plugin-instance.js";
-import { markPluginRegistryActive, markPluginRegistryRetired } from "./registry-lifecycle.js";
+import {
+  markPluginRegistryActive,
+  markPluginRegistryRetired,
+  revokePluginRecord,
+} from "./registry-lifecycle.js";
 import { createPluginRegistry } from "./registry.js";
 import type { PluginRuntime } from "./runtime/types.js";
 import { createPluginRecord } from "./status.test-helpers.js";
@@ -85,6 +92,10 @@ const conversation = {
   parentConversationId: "parent-1",
 };
 
+const persistenceAvailable = () =>
+  asOptionalRecord(readGlobalSingleton(Symbol.for("openclaw.discordThreadBindingsState")))
+    ?.persistenceAvailable;
+
 async function setup() {
   const state = await createOpenClawTestState({
     layout: "state-only",
@@ -118,6 +129,7 @@ async function setup() {
     const owner = {
       instance,
       retire: () => markPluginRegistryRetired(builder.registry),
+      revoke: () => revokePluginRecord(builder.registry, record),
       dispose: () => instance.dispose(),
       start: (accountId = "default") =>
         instance.run(() => createTestThreadBindingManager({ accountId, persist: true })),
@@ -149,7 +161,7 @@ async function setup() {
         binding: { summary },
       }),
     );
-  return { foreign, owner, manager, createOwner, stored, snapshot, refresh };
+  return { state, foreign, owner, manager, createOwner, stored, snapshot, refresh };
 }
 
 describe("Discord binding runtime ownership", () => {
@@ -358,6 +370,83 @@ describe("Discord binding runtime ownership", () => {
     await expect(manager.touchThread({ threadId: "thread-1" })).rejects.toThrow("stopping");
     await refresh("replacement");
     expect(await stored()).toMatchObject([{ value: { metadata: { summary: "replacement" } } }]);
+  });
+
+  const persistenceMutations = ["sync update", "sync unbind", "async update"] as const;
+  const mutatePersistence = (
+    operation: (typeof persistenceMutations)[number],
+    targetSessionKey: string,
+  ) =>
+    operation === "sync unbind"
+      ? unbindThreadBindingsBySessionKey({ targetSessionKey, sendFarewell: false })
+      : (operation === "sync update"
+          ? setThreadBindingIdleTimeoutBySessionKey
+          : setThreadBindingIdleTimeoutBySessionKeyAsync)({
+          targetSessionKey,
+          idleTimeoutMs: 45_000,
+        });
+
+  it.each([
+    { authority: "retired", operation: "control" },
+    ...(["retired", "revoked"] as const).flatMap((authority) =>
+      persistenceMutations.map((operation) => ({ authority, operation })),
+    ),
+  ] as const)(
+    "keeps replacement persistence after $authority $operation",
+    async ({ authority, operation }) => {
+      const { foreign, owner, manager, createOwner, stored, snapshot } = await setup();
+      const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+      if (authority === "retired") {
+        owner.retire();
+      } else {
+        owner.revoke();
+      }
+      if (operation !== "control") {
+        await foreign.run(() => mutatePersistence(operation, original.targetSessionKey));
+      }
+      expect.soft(persistenceAvailable(), "after authority refusal").toBe(true);
+      expect.soft(manager.getByThreadId("thread-1"), "refused memory write").toEqual(original);
+      expect(await stored()).toEqual(snapshot);
+      await manager.stop();
+      const replacement = createOwner();
+      await replacement.start();
+      await replacement.instance.run(() =>
+        bindConversationNow({
+          identity,
+          conversation: { ...conversation, conversationId: "thread-2" },
+          summary: "replacement owner",
+        }),
+      );
+      expect({ persistenceAvailable: persistenceAvailable(), rows: await stored() }).toMatchObject({
+        persistenceAvailable: true,
+        rows: [
+          ...snapshot.map(({ key, value }) => ({ key, value })),
+          { key: "default:thread-2", value: { metadata: { summary: "replacement owner" } } },
+        ],
+      });
+    },
+  );
+
+  it.each(persistenceMutations)("keeps the storage failure fallback for %s", async (operation) => {
+    const { state, foreign, manager, stored, snapshot } = await setup();
+    const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+    const db = openOpenClawStateDatabase({ env: state.env }).db;
+    const removing = operation === "sync unbind";
+    db.exec(`CREATE TRIGGER fail_discord_binding_write BEFORE ${removing ? "DELETE" : "INSERT"}
+      ON plugin_state_entries WHEN ${removing ? "OLD" : "NEW"}.plugin_id = 'discord'
+      BEGIN SELECT RAISE(ABORT, 'synthetic Discord storage failure'); END`);
+    try {
+      await foreign.run(() => mutatePersistence(operation, original.targetSessionKey));
+      expect(persistenceAvailable()).toBe(false);
+      if (removing) {
+        expect(manager.getByThreadId("thread-1")).toBeUndefined();
+      } else {
+        expect(manager.getByThreadId("thread-1")).toMatchObject({ idleTimeoutMs: 45_000 });
+      }
+      expect(await stored()).toEqual(snapshot);
+    } finally {
+      db.exec("DROP TRIGGER fail_discord_binding_write");
+    }
   });
 
   it("keeps overlapping accounts bound to their own runtime", async () => {

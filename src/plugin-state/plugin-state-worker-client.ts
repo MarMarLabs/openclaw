@@ -1,3 +1,4 @@
+import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
 import { err, ok, type Result } from "@openclaw/normalization-core/result";
 import { assertSessionEntriesCurrentAdmission } from "../config/sessions/session-entry-current-admission.js";
 import type {
@@ -32,6 +33,7 @@ import {
   beginPluginStateMutation,
   capturePluginStateMutationSettlement,
 } from "./plugin-state-operation-epochs.js";
+import { isPluginStateRuntimeInactiveError } from "./plugin-state-operation-error.js";
 import {
   beginPluginStatePublication,
   recordPluginStateReadDependency,
@@ -174,6 +176,7 @@ async function execute<Key extends keyof PluginStateWorkerOperations>(
     capturedContext?.admission.databasePath ?? resolveOpenClawStateSqlitePath(env ?? process.env);
   const description = pluginStateWorkerOperations[command.type];
   let operationStarted = false;
+  let runtimeRefusal: unknown;
   let order: PluginStateCommandOrder | undefined;
   let publication: ReturnType<typeof beginPluginStatePublication> | undefined;
   let installObservation: ReturnType<typeof preparePluginStateObservationCacheRead> | undefined;
@@ -369,7 +372,14 @@ async function execute<Key extends keyof PluginStateWorkerOperations>(
     }
     const assertWriteCurrent = (request: SqliteWorkerAdmissionRequest) => {
       context.admission.assertCurrent();
-      assertAdmission?.();
+      try {
+        assertAdmission?.();
+      } catch (error) {
+        if (isPluginStateRuntimeInactiveError(error)) {
+          runtimeRefusal = error;
+        }
+        throw error;
+      }
       assertSessionEntriesCurrentAdmission(request, currentEntries);
     };
     const baseAdmission: SqliteWorkerAdmissionFactory =
@@ -409,6 +419,14 @@ async function execute<Key extends keyof PluginStateWorkerOperations>(
     }
     return result;
   } catch (error) {
+    // The worker's closed reply omits the host refusal. Retain only that known cause.
+    if (
+      runtimeRefusal &&
+      error instanceof PluginStateStoreError &&
+      extractErrorCode(error.cause) === "closed"
+    ) {
+      error.cause = runtimeRefusal;
+    }
     throw wrapPluginStateError(
       error,
       description.operation,

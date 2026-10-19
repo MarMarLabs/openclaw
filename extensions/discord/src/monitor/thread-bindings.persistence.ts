@@ -1,5 +1,8 @@
 import { enqueueKeyedTask } from "openclaw/plugin-sdk/keyed-async-queue";
-import { createPluginStateErrorReporter } from "openclaw/plugin-sdk/plugin-state-runtime";
+import {
+  createPluginStateErrorReporter,
+  isPluginStateRuntimeInactiveError,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { asOptionalObjectRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -135,7 +138,11 @@ export async function commitBindingRecord(params: {
           failure = interruption;
         }
       }
-      if (authorityRefused) {
+      const runtimeInactive = isPluginStateRuntimeInactiveError(error);
+      if (runtimeInactive && !authorityRefused && !targetCommitted) {
+        return;
+      }
+      if (authorityRefused || runtimeInactive) {
         createPluginStateErrorReporter(
           getDiscordRuntime,
           "discord",
@@ -228,7 +235,10 @@ export function updateBindingRecordSync(params: {
     try {
       const updated = persistBindingsSync(params.runtime, params);
       return updated ?? null;
-    } catch {
+    } catch (error) {
+      if (isPluginStateRuntimeInactiveError(error)) {
+        return null;
+      }
       THREAD_BINDINGS_STATE.persistenceAvailable = false;
       logVerbose("discord thread binding persistence unavailable; keeping bindings in memory");
     }
@@ -261,7 +271,10 @@ export function removeBindingRecordSync(
     removed = removeBindingRecord(bindingKey);
     persistBindingsSync(runtime);
     return removed;
-  } catch {
+  } catch (error) {
+    if (isPluginStateRuntimeInactiveError(error)) {
+      return removed;
+    }
     THREAD_BINDINGS_STATE.persistenceAvailable = false;
     return removed ?? removeBindingRecord(bindingKey);
   }
