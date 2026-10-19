@@ -24,6 +24,7 @@ type StoredDiscordBinding = {
   metadata?: Record<string, unknown>;
   lastActivityAt: number;
   idleTimeoutMs?: number;
+  maxAgeMs?: number;
 };
 type DiscordBindingManager = {
   getByThreadId: (threadId: string) => StoredDiscordBinding | undefined;
@@ -35,6 +36,7 @@ type DiscordBindingManager = {
 };
 type SessionUnbindParams = { targetSessionKey: string; sendFarewell?: boolean };
 type IdleUpdateParams = { targetSessionKey: string; idleTimeoutMs: number };
+type MaxAgeUpdateParams = { targetSessionKey: string; maxAgeMs: number };
 
 const { loadDiscordThreadBindingTestHarness, resetThreadBindingsForTests } =
   await loadBundledPluginFacade<{
@@ -55,6 +57,8 @@ const {
   unbindThreadBindingsBySessionKeyAsync,
   setThreadBindingIdleTimeoutBySessionKey,
   setThreadBindingIdleTimeoutBySessionKeyAsync,
+  setThreadBindingMaxAgeBySessionKey,
+  setThreadBindingMaxAgeBySessionKeyAsync,
 } = await loadBundledPluginFacade<{
   setDiscordRuntime: (runtime: PluginRuntime) => void;
   unbindThreadBindingsBySessionKey: (params: SessionUnbindParams) => StoredDiscordBinding[];
@@ -64,6 +68,10 @@ const {
   setThreadBindingIdleTimeoutBySessionKey: (params: IdleUpdateParams) => StoredDiscordBinding[];
   setThreadBindingIdleTimeoutBySessionKeyAsync: (
     params: IdleUpdateParams,
+  ) => Promise<StoredDiscordBinding[]>;
+  setThreadBindingMaxAgeBySessionKey: (params: MaxAgeUpdateParams) => StoredDiscordBinding[];
+  setThreadBindingMaxAgeBySessionKeyAsync: (
+    params: MaxAgeUpdateParams,
   ) => Promise<StoredDiscordBinding[]>;
 }>({ pluginId: "discord", artifactBasename: "runtime-api.js" });
 
@@ -236,6 +244,108 @@ describe("Discord binding runtime ownership", () => {
     owner.retire();
     await refresh("retired write");
     expect(await stored()).toEqual(snapshot);
+  });
+
+  const mutations = [
+    { mode: "sync", operation: "touch" },
+    { mode: "async", operation: "touch" },
+    { mode: "sync", operation: "idle timeout" },
+    { mode: "async", operation: "idle timeout" },
+    { mode: "sync", operation: "max age" },
+    { mode: "async", operation: "max age" },
+    { mode: "sync", operation: "unbind" },
+    { mode: "async", operation: "unbind" },
+    { mode: "async", operation: "rebind" },
+    { mode: "async", operation: "detach" },
+  ] as const;
+  it.each(
+    mutations.flatMap((mutation) =>
+      (["active", "retired-before-stop", "stopped"] as const).map((state) => ({
+        mode: mutation.mode,
+        operation: mutation.operation,
+        state,
+      })),
+    ),
+  )("guards $mode $operation while $state", async ({ mode, operation, state }) => {
+    const { foreign, owner, manager, stored, snapshot, refresh } = await setup();
+    const targetSessionKey = expectDefined(
+      manager.getByThreadId("thread-1"),
+      "seed binding",
+    ).targetSessionKey;
+    if (state !== "active") {
+      owner.retire();
+    }
+    if (state === "stopped") {
+      await manager.stop();
+    }
+    const at = Date.now() + 30_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(at);
+    try {
+      const mutate = async () => {
+        switch (operation) {
+          case "touch":
+            return mode === "sync"
+              ? manager.touchThreadSync({ threadId: "thread-1", at })
+              : manager.touchThread({ threadId: "thread-1", at });
+          case "idle timeout":
+            return (
+              mode === "sync"
+                ? setThreadBindingIdleTimeoutBySessionKey
+                : setThreadBindingIdleTimeoutBySessionKeyAsync
+            )({
+              targetSessionKey,
+              idleTimeoutMs: 45_000,
+            });
+          case "max age":
+            return (
+              mode === "sync"
+                ? setThreadBindingMaxAgeBySessionKey
+                : setThreadBindingMaxAgeBySessionKeyAsync
+            )({
+              targetSessionKey,
+              maxAgeMs: 90_000,
+            });
+          case "unbind":
+            return (
+              mode === "sync"
+                ? unbindThreadBindingsBySessionKey
+                : unbindThreadBindingsBySessionKeyAsync
+            )({ targetSessionKey, sendFarewell: false });
+          case "rebind":
+            return refresh("guarded refresh");
+          case "detach":
+            return detachPluginConversationBinding({
+              pluginRoot: identity.pluginRoot,
+              conversation,
+            });
+          default:
+            throw new Error("Unsupported binding mutation");
+        }
+      };
+      const result = foreign.run(mutate);
+      if (state === "stopped" && operation === "touch") {
+        await expect(result).rejects.toThrow(/stopping|was retired/);
+      } else {
+        await result;
+      }
+      if (state !== "active") {
+        expect(await stored()).toEqual(snapshot);
+      } else if (operation === "unbind" || operation === "detach") {
+        expect(await stored()).toEqual([]);
+      } else {
+        const expected =
+          operation === "touch"
+            ? { lastActivityAt: at }
+            : operation === "idle timeout"
+              ? { idleTimeoutMs: 45_000 }
+              : operation === "max age"
+                ? { maxAgeMs: 90_000 }
+                : { metadata: { summary: "guarded refresh" } };
+        expect(await stored()).toMatchObject([{ value: expected }]);
+      }
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("captures the replacement runtime after the previous manager stops", async () => {

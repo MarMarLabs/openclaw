@@ -483,7 +483,7 @@ describe("plugin-state-store.runtime", () => {
   });
 
   it("binds keyed stores to local plugin ids and keeps resolveStateDir", async ({ state }) => {
-    const { addPlugin, runtime } = setup("discord", "config");
+    const { addPlugin, runtime } = setup("discord", "config", true);
 
     expect(runtime.resolveStateDir()).toBe(state.stateDir);
     const observation = observeHostDataSql();
@@ -523,6 +523,59 @@ describe("plugin-state-store.runtime", () => {
     expect(syncStore.registerIfAbsent("k", { plugin: "discord" })).toBe(true);
     expect(syncStore.lookup("k")).toEqual({ plugin: "discord" });
   });
+
+  it.for([
+    "register",
+    "registerIfAbsent",
+    "update",
+    "deleteIf",
+    "consume",
+    "delete",
+    "clear",
+  ] as const)(
+    "fences sync %s on a retained handle after its owner is revoked",
+    async (operation, { state: _state }) => {
+      const { record, registry, runtime } = setup("sync-owner", "config", true);
+      const store = runtime.openSyncKeyedStore<number>(keyedOptions);
+      store.register("retained", 1);
+      const snapshot = store.entries();
+      revokePluginRecord(registry.registry, record);
+      const mutations = {
+        register: () => store.register("denied", 2),
+        registerIfAbsent: () => store.registerIfAbsent("denied", 2),
+        update: () => store.update!("retained", () => 2),
+        deleteIf: () => store.deleteIf!("retained", () => true),
+        consume: () => store.consume("retained"),
+        delete: () => store.delete("retained"),
+        clear: () => store.clear(),
+      };
+      expect(mutations[operation]).toThrow('Plugin "sync-owner" runtime is no longer active');
+      expect(store.entries()).toEqual(snapshot);
+      expect(() => runtime.openSyncKeyedStore(keyedOptions)).toThrow(
+        'Plugin "sync-owner" runtime is no longer active',
+      );
+    },
+  );
+
+  it.for(["update", "deleteIf"] as const)(
+    "fences sync %s when its callback revokes its owner",
+    async (operation, { state: _state }) => {
+      const { record, registry, runtime } = setup("sync-owner", "config", true);
+      const store = runtime.openSyncKeyedStore<number>(keyedOptions);
+      store.register("retained", 1);
+      const snapshot = store.entries();
+      const revoke = () => {
+        revokePluginRecord(registry.registry, record);
+        return 2;
+      };
+      const mutations = {
+        update: () => store.update!("retained", revoke),
+        deleteIf: () => store.deleteIf!("retained", () => Boolean(revoke())),
+      };
+      expect(mutations[operation]).toThrow();
+      expect(store.entries()).toEqual(snapshot);
+    },
+  );
 
   it("fences retained operations and range reads when the owning plugin closes", async ({
     state: _state,

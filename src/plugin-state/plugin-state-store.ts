@@ -478,13 +478,20 @@ export function createPluginStateRuntimeStores(
         captureModuleSource?.(),
       ),
     openSyncKeyedStore: <T>(options: OpenKeyedStoreOptions) => {
+      assertRuntimeCurrent();
       warnPluginSdkDeprecation({
         pluginId,
         family: "plugin-state-keyed-store",
         method: "api.runtime.state.openSyncKeyedStore",
         replacement: "api.runtime.state.openKeyedStoreV2 and await its operations",
       });
-      return createSyncKeyedStoreForPluginId<T>(pluginId, options, true, pluginId);
+      return createSyncKeyedStoreForPluginId<T>(
+        pluginId,
+        options,
+        true,
+        pluginId,
+        assertRuntimeCurrent,
+      );
     },
   };
 }
