@@ -18,6 +18,7 @@ import { registerSessionBindingAdapterV2 } from "openclaw/plugin-sdk/thread-bind
 import { warnPluginSdkDeprecation } from "openclaw/plugin-sdk/thread-bindings-session-runtime";
 import { createDiscordRestClient } from "../client.js";
 import { getChannel } from "../internal/discord.js";
+import { getOptionalDiscordRuntime } from "../runtime.js";
 import {
   createThreadForBinding,
   createWebhookForChannel,
@@ -57,6 +58,7 @@ import {
   resolvePreparedThreadBindingLifecycle,
   resolveThreadBindingMaxAgeMs,
   THREAD_BINDING_TOUCH_PERSIST_MIN_INTERVAL_MS,
+  THREAD_BINDINGS_STATE,
   shouldDefaultPersist,
 } from "./thread-bindings.state.js";
 import {
@@ -111,6 +113,7 @@ function createLoadedThreadBindingManager(
     return existing;
   }
 
+  const runtime = getOptionalDiscordRuntime();
   const persist = params.persist ?? shouldDefaultPersist();
   PERSIST_BY_ACCOUNT_ID.set(accountId, persist);
   const idleTimeoutMs = normalizeThreadBindingDurationMs(
@@ -254,6 +257,7 @@ function createLoadedThreadBindingManager(
     }
     const { bindingKey, record: existingLocal } = binding;
     await commitBindingRecord({
+      runtime,
       bindingKey,
       previous: existingLocal,
       next: null,
@@ -325,6 +329,7 @@ function createLoadedThreadBindingManager(
       }
       const at = normalizeTouchTimestamp(input.at);
       return updateBindingRecordSync({
+        runtime,
         bindingKey: key,
         transform: (record) => touchBindingRecord(record, at),
         persist: (input.persist ?? persist) && shouldPersistAnyBindingState(),
@@ -344,6 +349,7 @@ function createLoadedThreadBindingManager(
         const { bindingKey, record: existingResult } = binding;
         const nextRecord = touchBindingRecord(existingResult, touchParams.at);
         await commitBindingRecord({
+          runtime,
           bindingKey,
           previous: existingResult,
           next: nextRecord,
@@ -485,6 +491,7 @@ function createLoadedThreadBindingManager(
         }
         await runThreadBindingMutation(() =>
           commitBindingRecord({
+            runtime,
             bindingKey: toBindingRecordKey({ accountId, threadId }),
             previous: existingValue,
             next: record,
@@ -610,6 +617,8 @@ function createLoadedThreadBindingManager(
   registerSessionBindingAdapterV2(sessionBindingAdapter);
 
   MANAGERS_BY_ACCOUNT_ID.set(accountId, manager);
+  // Session-wide helpers must retain this owner even when called from another plugin instance.
+  THREAD_BINDINGS_STATE.runtimeByManager.set(manager, runtime);
   return manager;
 }
 
