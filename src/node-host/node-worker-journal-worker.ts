@@ -8,9 +8,12 @@ import {
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerOperations } from "../state/openclaw-state-worker-contract.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
+import type { WorkerOperations } from "../state/worker-operation-registry.js";
 import type { NodeWorkerJournalAuthority } from "./node-worker-journal.types.js";
-import type { NodeWorkerJournalWorkerOperations } from "./node-worker-journal.worker-contract.js";
+import type { nodeWorkerJournalOperations } from "./node-worker-journal.worker.js";
 import { nodePreparedWorkspacePublication } from "./node-worker-prepared-workspace-publication.js";
+
+type NodeWorkerJournalWorkerOperations = WorkerOperations<typeof nodeWorkerJournalOperations>;
 
 type JournalScope = {
   execute<Key extends keyof NodeWorkerJournalWorkerOperations>(command: {
@@ -107,13 +110,9 @@ export class NodeWorkerJournalWorker {
       return Promise.reject(this.uncertain);
     }
     const context = captureOpenClawStateWorkerContext(this.options);
-    let active = true;
     const assertCurrent = () => {
       if (this.uncertain) {
         throw this.uncertain;
-      }
-      if (!active) {
-        throw new Error("Node worker journal operation has settled");
       }
       authority?.assertCurrent();
     };
@@ -133,15 +132,8 @@ export class NodeWorkerJournalWorker {
         }
         this.settlements.delete(retained.settled);
       });
-      const admission = createSqliteWorkerOperationAdmission((request, grant) => {
+      const admission = createSqliteWorkerOperationAdmission((_request, grant) => {
         assertCurrent();
-        if (
-          request.stage !== "transaction" ||
-          !isRecord(request.facts) ||
-          request.facts.kind !== "node-worker-journal"
-        ) {
-          throw new Error("Node worker journal transaction admission was refused");
-        }
         grant();
       });
       const publication = preparedMutation
@@ -175,15 +167,12 @@ export class NodeWorkerJournalWorker {
           existingOnly: true,
         })
       : runOpenClawStateWorkerOperation(context, operation, { assertCurrent, createAdmission });
-    const result = admitted.finally(() => {
-      active = false;
-    });
-    this.pending.add(result);
-    void result.then(
-      () => this.pending.delete(result),
-      () => this.pending.delete(result),
+    this.pending.add(admitted);
+    void admitted.then(
+      () => this.pending.delete(admitted),
+      () => this.pending.delete(admitted),
     );
-    return result;
+    return admitted;
   }
 
   async drain(options: { close?: boolean } = {}): Promise<void> {

@@ -1,4 +1,3 @@
-// Builds channel status rows and account details for `openclaw status --all`.
 // This layer stays plugin-generic: channel-specific auth rules live in plugin config/status hooks.
 
 import fs from "node:fs";
@@ -9,6 +8,7 @@ import {
   resolveInspectedChannelAccount,
   type ChannelAccountInspectionResult,
 } from "../../channels/account-inspection.js";
+import { resolveChannelAllowFrom } from "../../channels/account-resolution.js";
 import { hasConfiguredUnavailableCredentialStatus } from "../../channels/account-snapshot-fields.js";
 import { formatChannelAllowFrom } from "../../channels/account-summary.js";
 import { resolveChannelDefaultAccountId } from "../../channels/plugins/helpers.js";
@@ -48,7 +48,7 @@ const formatAccountLabel = (params: { accountId: string; name?: string }) => {
   return base;
 };
 
-const buildAccountNotes = (params: {
+const buildAccountNotes = async (params: {
   plugin: ChannelPlugin;
   cfg: OpenClawConfig;
   entry: ChannelAccountRow;
@@ -97,7 +97,7 @@ const buildAccountNotes = (params: {
     entry.kind === "unavailable" || hasConfiguredUnavailableCredentialStatus(entry.account);
   const allowFrom = unavailable
     ? snapshot.allowFrom
-    : (plugin.config.resolveAllowFrom?.({ cfg, accountId: snapshot.accountId }) ??
+    : ((await resolveChannelAllowFrom({ plugin, cfg, accountId: snapshot.accountId })) ??
       snapshot.allowFrom);
   if (allowFrom?.length) {
     // Cap allow-list output so large channel policies do not dominate the status table.
@@ -359,31 +359,34 @@ export async function buildChannelsTable(
       details.push({
         title: `${label} accounts`,
         columns: ["Account", "Status", "Notes"],
-        rows: configuredAccounts.map((entry) => {
-          const liveCredentialAvailable = hasRuntimeCredentialAvailable({
-            liveAccounts,
-            accountId: entry.accountId,
-          });
-          const notes = buildAccountNotes({
-            plugin,
-            cfg,
-            entry,
-            liveCredentialAvailable,
-          });
-          return {
-            Account: formatAccountLabel({
+        rows: await Promise.all(
+          configuredAccounts.map(async (entry) => {
+            const liveCredentialAvailable = hasRuntimeCredentialAvailable({
+              liveAccounts,
               accountId: entry.accountId,
-              name: entry.snapshot.name,
-            }),
-            Status:
-              entry.enabled &&
-              entry.kind !== "unavailable" &&
-              (!hasConfiguredUnavailableCredentialStatus(entry.account) || liveCredentialAvailable)
-                ? "OK"
-                : "WARN",
-            Notes: notes.join(" · "),
-          };
-        }),
+            });
+            const notes = await buildAccountNotes({
+              plugin,
+              cfg,
+              entry,
+              liveCredentialAvailable,
+            });
+            return {
+              Account: formatAccountLabel({
+                accountId: entry.accountId,
+                name: entry.snapshot.name,
+              }),
+              Status:
+                entry.enabled &&
+                entry.kind !== "unavailable" &&
+                (!hasConfiguredUnavailableCredentialStatus(entry.account) ||
+                  liveCredentialAvailable)
+                  ? "OK"
+                  : "WARN",
+              Notes: notes.join(" · "),
+            };
+          }),
+        ),
       });
     }
   }

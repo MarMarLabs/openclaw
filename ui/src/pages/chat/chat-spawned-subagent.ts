@@ -3,7 +3,7 @@ import { asNullableRecord as asRecord } from "@openclaw/normalization-core/recor
 import { normalizeOptionalString as text } from "@openclaw/normalization-core/string-coerce";
 import type { GatewaySessionRow } from "../../api/types.ts";
 import type { ToolCard } from "../../lib/chat/chat-types.ts";
-import { isSessionRunActive } from "../../lib/session-run-state.ts";
+import { isSessionRunStateActive } from "../../lib/session-run-state.ts";
 import {
   areUiSessionKeysEquivalent,
   isDashboardSessionKey,
@@ -17,6 +17,8 @@ export type SubagentRoster = {
   subagentSessions?: readonly GatewaySessionRow[];
   /** True once the pane's own child query answered; seeded rows can be partial. */
   subagentSessionsHydrated?: boolean;
+  /** A newly named child is still awaiting a covering read before the wait can count it. */
+  subagentSessionsPending?: boolean;
   /**
    * True once the pane's own child query answered at least once. Seeded rows
    * take ancestry from the broad list, which outlives the child-link retention.
@@ -84,17 +86,13 @@ export function spawnedSubagentLabel(card: LaunchCard): string | undefined {
   return launch && !launch.ownSession ? launch.label : undefined;
 }
 
-/** The children the Subagents panel lists. A swarm's workers report through its own progress. */
 export function isSubagentsPanelSession(row: GatewaySessionRow): boolean {
-  return (
-    (row.classification === "subagent" || isSubagentSessionKey(row.key)) &&
-    !row.swarmGroupId?.trim()
-  );
+  return row.classification === "subagent" || isSubagentSessionKey(row.key);
 }
 
 /** A subagent that handed off to its own subagents is still at work. */
 export function isUnfinishedSubagent(row: GatewaySessionRow): boolean {
-  return isSessionRunActive(row) || row.hasActiveSubagentRun === true;
+  return isSessionRunStateActive(row) || row.hasActiveSubagentRun === true;
 }
 
 function finishedRuntimeMs(row: GatewaySessionRow): number | null {
@@ -107,7 +105,7 @@ function finishedRuntimeMs(row: GatewaySessionRow): number | null {
     : null;
 }
 
-function endedWithoutFinishing(row: GatewaySessionRow): "failed" | "stopped" | undefined {
+export function endedWithoutFinishing(row: GatewaySessionRow): "failed" | "stopped" | undefined {
   if (row.status === "failed" || row.status === "timeout") {
     return "failed";
   }

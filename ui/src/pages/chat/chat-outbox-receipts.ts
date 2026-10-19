@@ -20,7 +20,7 @@ import {
   readStoredChatOutbox,
   type StoredChatOutbox,
 } from "../../lib/chat/outbox-store-projection.ts";
-import { isSessionRunActive } from "../../lib/session-run-state.ts";
+import { isSessionRunStateActive } from "../../lib/session-run-state.ts";
 import {
   scopedAgentListParamsForRefreshTarget,
   visibleSessionMatches,
@@ -446,6 +446,7 @@ export async function readCurrentStoredChatHistory(
       }
       const receipt = readChatInputReceipt(history, sibling);
       if (receipt === "pending") {
+        confirmQueuedMessageCustody(host, sibling, historySessionId);
         continue;
       }
       const canonical = findChatSubmissionMessage(history.messages, sibling.sendRunId, true);
@@ -527,7 +528,7 @@ export async function readCurrentStoredChatHistory(
     if (
       !history.sessionInfo ||
       history.sessionInfo.hasActiveRun === true ||
-      isSessionRunActive(history.sessionInfo)
+      isSessionRunStateActive(history.sessionInfo)
     ) {
       return "blocked";
     }
@@ -549,7 +550,7 @@ export async function readCurrentStoredChatHistory(
         current.row.sessionId !== sessionId ||
         current.row.lastRunId !== runId ||
         current.row.hasActiveRun === true ||
-        isSessionRunActive(current.row)
+        isSessionRunStateActive(current.row)
       ) {
         return "blocked";
       }

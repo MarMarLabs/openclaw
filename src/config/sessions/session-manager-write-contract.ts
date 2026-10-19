@@ -1,7 +1,7 @@
 import type { Result } from "@openclaw/normalization-core/result";
 import type { BashExecutionMessage, CustomMessage } from "../../agents/sessions/messages.js";
 import type {
-  CommittedCompactionAppend,
+  CommittedCompactionBoundary,
   PreparedCompactionAppend,
 } from "../../agents/sessions/session-compaction-persistence.js";
 import type {
@@ -24,16 +24,16 @@ import type {
   TranscriptMessageWriteSnapshot,
   TranscriptWriteSnapshot,
 } from "./session-accessor.sqlite-contract.js";
-import type {
-  SessionPendingInputWorkerFacts,
-  SessionPendingInputWorkerReceipt,
-} from "./session-accessor.sqlite-pending-inputs.js";
 import type { SessionTranscriptRuntimeTarget } from "./session-accessor.types.js";
 import type { PreparedSessionTranscriptHydration as PreparedSessionTranscriptReload } from "./session-history-read.types.js";
 import type {
+  SessionPendingInputWorkerFacts,
+  SessionPendingInputWorkerReceipt,
+} from "./session-pending-input.types.js";
+import type {
   InitialSessionTranscriptWriter,
   SessionTranscriptWriterFence,
-} from "./transcript-write-context.js";
+} from "./session-transcript-writer.types.js";
 import type { InternalSessionEntry } from "./types.js";
 
 type MetadataTarget = Omit<SessionTranscriptWriteScope, "env"> & SessionTranscriptRuntimeTarget;
@@ -123,13 +123,12 @@ export type CompactionBoundaryOperations = {
       prepared: Omit<PreparedCompactionAppend, "scope"> & {
         scope: Omit<PreparedCompactionAppend["scope"], "env">;
       };
-      transcriptByteCompactionLatch: NonNullable<
-        InternalSessionEntry["transcriptByteCompactionLatch"]
-      >;
+      transcriptByteCompactionLatch: InternalSessionEntry["transcriptByteCompactionLatch"] | null;
+      tokensAfter?: number;
       initialWriterRunId?: string;
     };
     output: {
-      committed: CommittedCompactionAppend;
+      committed: CommittedCompactionBoundary;
       initialEntry?: InitialSessionEntryCommit;
       projectionNeedsReconcile: boolean;
     };
@@ -180,6 +179,7 @@ export type SessionMetadataOperations = SessionMaintenanceOperations &
           loadedVersion?: SessionTranscriptContextVersion;
           limits?: SessionManagerBoundedContextLimits;
           admission?: UserTurnTranscriptAdmissionReceipt;
+          questionAnswers?: readonly UserTurnTranscriptAdmissionReceipt[];
         };
       };
       output: {
