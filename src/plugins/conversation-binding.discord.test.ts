@@ -35,6 +35,14 @@ type StoredDiscordBinding = {
 };
 type DiscordBindingManager = {
   getByThreadId: (threadId: string) => StoredDiscordBinding | undefined;
+  bindTarget: (params: {
+    threadId: string;
+    channelId: string;
+    targetSessionKey: string;
+    metadata?: Record<string, unknown>;
+  }) => Promise<StoredDiscordBinding | null>;
+  unbindThread: (params: { threadId: string }) => Promise<StoredDiscordBinding | null>;
+  notifyUnbound: (record: StoredDiscordBinding, params: { sendFarewell?: boolean }) => void;
   touchThread: (params: { threadId: string; at?: number }) => Promise<StoredDiscordBinding | null>;
   touchThreadSync: (
     params: Parameters<DiscordBindingManager["touchThread"]>[0],
@@ -254,9 +262,43 @@ describe("Discord binding runtime ownership", () => {
     const candidate = createOwner();
     expect(await candidate.start()).toBe(manager);
     owner.retire();
-    await refresh("retired write");
+    await expect(refresh("retired write")).rejects.toMatchObject({
+      code: "PLUGIN_STATE_RUNTIME_INACTIVE",
+    });
     expect(await stored()).toEqual(snapshot);
   });
+
+  it.each(["unbindThread", "bindTarget", "session update"] as const)(
+    "does not report success for refused %s before manager shutdown",
+    async (operation) => {
+      const { foreign, owner, manager, stored, snapshot } = await setup();
+      const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+      const notifyUnbound = vi.spyOn(manager, "notifyUnbound");
+      owner.retire();
+      const result = foreign.run(() => {
+        if (operation === "unbindThread") {
+          return manager.unbindThread({ threadId: "thread-1" });
+        }
+        if (operation === "bindTarget") {
+          return manager.bindTarget({
+            threadId: "thread-1",
+            channelId: "parent-1",
+            targetSessionKey: original.targetSessionKey,
+            metadata: { summary: "refused replacement" },
+          });
+        }
+        return setThreadBindingIdleTimeoutBySessionKeyAsync({
+          targetSessionKey: original.targetSessionKey,
+          idleTimeoutMs: 45_000,
+        });
+      });
+      await expect.soft(result).rejects.toMatchObject({ code: "PLUGIN_STATE_RUNTIME_INACTIVE" });
+      expect.soft(notifyUnbound).not.toHaveBeenCalled();
+      expect.soft(manager.getByThreadId("thread-1")).toEqual(original);
+      expect.soft(persistenceAvailable()).toBe(true);
+      expect(await stored()).toEqual(snapshot);
+    },
+  );
 
   const mutations = [
     { mode: "sync", operation: "touch" },
@@ -337,6 +379,8 @@ describe("Discord binding runtime ownership", () => {
       const result = foreign.run(mutate);
       if (state === "stopped" && operation === "touch") {
         await expect(result).rejects.toThrow(/stopping|was retired/);
+      } else if (state === "retired-before-stop" && mode === "async") {
+        await expect(result).rejects.toMatchObject({ code: "PLUGIN_STATE_RUNTIME_INACTIVE" });
       } else {
         await result;
       }
@@ -402,7 +446,12 @@ describe("Discord binding runtime ownership", () => {
         owner.revoke();
       }
       if (operation !== "control") {
-        await foreign.run(() => mutatePersistence(operation, original.targetSessionKey));
+        const result = foreign.run(() => mutatePersistence(operation, original.targetSessionKey));
+        if (operation === "async update") {
+          await expect(result).rejects.toMatchObject({ code: "PLUGIN_STATE_RUNTIME_INACTIVE" });
+        } else {
+          await result;
+        }
       }
       expect.soft(persistenceAvailable(), "after authority refusal").toBe(true);
       expect.soft(manager.getByThreadId("thread-1"), "refused memory write").toEqual(original);

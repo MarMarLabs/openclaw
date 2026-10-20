@@ -140,7 +140,7 @@ export async function commitBindingRecord(params: {
       }
       const runtimeInactive = isPluginStateRuntimeInactiveError(error);
       if (runtimeInactive && !authorityRefused && !targetCommitted) {
-        return;
+        throw error;
       }
       if (authorityRefused || runtimeInactive) {
         createPluginStateErrorReporter(
