@@ -118,7 +118,7 @@ const persistenceAvailable = () =>
   asOptionalRecord(readGlobalSingleton(Symbol.for("openclaw.discordThreadBindingsState")))
     ?.persistenceAvailable;
 
-async function setup() {
+async function setup(persist = true) {
   const state = await createOpenClawTestState({
     layout: "state-only",
     prefix: "openclaw-discord-binding-owner-",
@@ -153,8 +153,8 @@ async function setup() {
       retire: () => markPluginRegistryRetired(builder.registry),
       revoke: () => revokePluginRecord(builder.registry, record),
       dispose: () => instance.dispose(),
-      start: (accountId = "default") =>
-        instance.run(() => createTestThreadBindingManager({ accountId, persist: true })),
+      start: (accountId = "default", persistence = persist) =>
+        instance.run(() => createTestThreadBindingManager({ accountId, persist: persistence })),
     };
     owners.push(owner);
     return owner;
@@ -172,9 +172,9 @@ async function setup() {
   );
   const stored = () => observer.entries();
   const snapshot = await stored();
-  expect(snapshot).toMatchObject([
-    { key: "default:thread-1", value: { metadata: { summary: "original" } } },
-  ]);
+  expect(snapshot).toMatchObject(
+    persist ? [{ key: "default:thread-1", value: { metadata: { summary: "original" } } }] : [],
+  );
   const refresh = (summary: string, accountId = "default") =>
     foreign.run(() =>
       requestPluginConversationBinding({
@@ -187,6 +187,128 @@ async function setup() {
 }
 
 describe("Discord binding runtime ownership", () => {
+  it.each(
+    (["throttled", "off", "unavailable"] as const).flatMap((persistence) =>
+      [
+        "async touch",
+        "sync touch",
+        "core touch",
+        ...(persistence === "throttled"
+          ? []
+          : ["async update", "sync update", "async unbind", "sync unbind", "bind"]),
+      ].flatMap((operation) =>
+        (["active", "retired"] as const).map((authority) => ({
+          persistence,
+          operation,
+          authority,
+        })),
+      ),
+    ),
+  )(
+    "guards $operation with $persistence persistence and $authority owner",
+    async ({ persistence, operation, authority }) => {
+      const { foreign, owner, manager, createOwner, stored, snapshot } = await setup(
+        persistence !== "off",
+      );
+      const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+      const binding = expectDefined(
+        await getSessionBindingService().resolveByConversationAsync(conversation),
+        "seed session binding",
+      );
+      if (persistence === "unavailable") {
+        const shared = expectDefined(
+          asOptionalRecord(readGlobalSingleton(Symbol.for("openclaw.discordThreadBindingsState"))),
+          "shared binding state",
+        );
+        shared.persistenceAvailable = false;
+      }
+      if (authority === "retired") {
+        owner.retire();
+      }
+      const at = original.lastActivityAt + 1_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(at);
+      onTestFinished(() => clock.mockRestore());
+      const result = foreign.run(async () => {
+        switch (operation) {
+          case "async touch":
+            return manager.touchThread({ threadId: "thread-1", at });
+          case "sync touch":
+            return manager.touchThreadSync({ threadId: "thread-1", at });
+          case "core touch":
+            return getSessionBindingService().touchAsync(
+              binding.bindingId,
+              undefined,
+              binding.conversation,
+            );
+          case "async update":
+          case "sync update":
+            return (
+              operation === "sync update"
+                ? setThreadBindingIdleTimeoutBySessionKey
+                : setThreadBindingIdleTimeoutBySessionKeyAsync
+            )({
+              targetSessionKey: original.targetSessionKey,
+              idleTimeoutMs: 45_000,
+            });
+          case "async unbind":
+          case "sync unbind":
+            return (
+              operation === "sync unbind"
+                ? unbindThreadBindingsBySessionKey
+                : unbindThreadBindingsBySessionKeyAsync
+            )({
+              targetSessionKey: original.targetSessionKey,
+              sendFarewell: false,
+            });
+          case "bind":
+            return manager.bindTarget({
+              threadId: "thread-1",
+              channelId: "parent-1",
+              targetSessionKey: original.targetSessionKey,
+              metadata: { summary: "memory-only replacement" },
+            });
+          default:
+            throw new Error("Unsupported memory-only mutation");
+        }
+      });
+      if (authority === "retired" && ["async update", "async unbind", "bind"].includes(operation)) {
+        await expect.soft(result).rejects.toMatchObject({ code: "PLUGIN_STATE_RUNTIME_INACTIVE" });
+      } else if (authority === "retired" && operation !== "core touch") {
+        await expect
+          .soft(result)
+          .resolves.toEqual(
+            operation.startsWith("sync ") && !operation.endsWith("touch") ? [] : null,
+          );
+      } else {
+        await result;
+      }
+      const after = manager.getByThreadId("thread-1");
+      if (authority === "retired") {
+        expect.soft(after).toEqual(original);
+      } else if (operation.endsWith("unbind")) {
+        expect.soft(after).toBeUndefined();
+      } else {
+        expect
+          .soft(after)
+          .toMatchObject(
+            operation.endsWith("touch")
+              ? { lastActivityAt: at }
+              : operation.endsWith("update")
+                ? { idleTimeoutMs: 45_000 }
+                : { metadata: { summary: "memory-only replacement" } },
+          );
+      }
+      expect.soft(persistenceAvailable()).toBe(persistence !== "unavailable");
+      expect(await stored()).toEqual(snapshot);
+      await manager.stop();
+      owner.retire();
+      const replacement = await createOwner().start("default", true);
+      expect(replacement.getByThreadId("thread-1")).toEqual(
+        authority === "retired" ? original : after,
+      );
+    },
+  );
+
   it("keeps a foreign-instance detach removed after manager restart", async () => {
     const { foreign, owner, manager, stored } = await setup();
     await expect(

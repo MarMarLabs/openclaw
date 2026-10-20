@@ -67,6 +67,21 @@ export function drainThreadBindingMutations(): Promise<void> {
   return THREAD_BINDINGS_STATE.mutationTail;
 }
 
+function assertBindingRuntimeActive(runtime: PluginRuntime | null | undefined): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    // Opening a V2 handle checks its captured authority without accessing storage.
+    openThreadBindingsStoreAsync(runtime);
+  } catch (error) {
+    // Only authority refusal blocks memory-only work; storage failures keep their fallback.
+    if (isPluginStateRuntimeInactiveError(error)) {
+      throw error;
+    }
+  }
+}
+
 export async function commitBindingRecord(params: {
   runtime?: PluginRuntime | null;
   bindingKey: string;
@@ -166,6 +181,7 @@ export async function commitBindingRecord(params: {
     }
   }
   if (!targetCommitted) {
+    assertBindingRuntimeActive(params.runtime);
     assertCurrent();
   }
   // Deprecated synchronous calls overlapping worker writes are best effort.
@@ -225,6 +241,11 @@ export function updateBindingRecordSync(params: {
   if (!record) {
     return null;
   }
+  try {
+    assertBindingRuntimeActive(params.runtime);
+  } catch {
+    return null;
+  }
   const now = Date.now();
   const persist =
     params.persist &&
@@ -259,6 +280,11 @@ export function removeBindingRecordSync(
 ): ThreadBindingRecord | null {
   const record = BINDINGS_BY_THREAD_ID.get(bindingKey);
   if (!record) {
+    return null;
+  }
+  try {
+    assertBindingRuntimeActive(runtime);
+  } catch {
     return null;
   }
   if (!shouldPersistBindingMutations() || !THREAD_BINDINGS_STATE.persistenceAvailable) {
