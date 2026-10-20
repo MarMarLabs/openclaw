@@ -581,6 +581,33 @@ describe("plugin-state-store.runtime", () => {
     },
   );
 
+  it("refuses a retired V2 runtime before capturing its operation source", async ({
+    state: _state,
+  }) => {
+    let current = true;
+    const assertRuntimeCurrent = () => {
+      if (!current) {
+        throw new Error('Plugin "state-owner" runtime is no longer active.');
+      }
+    };
+    const capture = vi.fn(() => {
+      assertRuntimeCurrent();
+      return undefined;
+    });
+    const runtime = createPluginStateRuntimeStores("state-owner", assertRuntimeCurrent, capture);
+    const store = runtime.openKeyedStoreV2<number>(keyedOptions);
+    await store.register("retained", 1);
+    expect(await store.lookup("retained")).toBe(1);
+    expect(capture).toHaveBeenCalledOnce();
+    current = false;
+    capture.mockClear();
+
+    expect(() => runtime.openKeyedStoreV2(keyedOptions)).toThrow(
+      expect.objectContaining({ code: "PLUGIN_STATE_RUNTIME_INACTIVE" }),
+    );
+    expect(capture).not.toHaveBeenCalled();
+  });
+
   it.for(["open", "commit"] as const)(
     "identifies V2 runtime refusal at %s without classifying storage errors",
     async (stage, { state: _state }) => {

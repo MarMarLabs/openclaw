@@ -22,8 +22,11 @@ import {
   detachPluginConversationBinding,
   requestPluginConversationBinding,
 } from "./conversation-binding.js";
+import { createPluginCache, retirePluginCache, withPluginCache } from "./plugin-cache.js";
+import { bindPluginInstanceModuleLoader } from "./plugin-instance-module-loader.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { PluginInstance } from "./plugin-instance.js";
+import { capturePluginStateOperationModuleSource } from "./plugin-state-operation-source.js";
 import {
   markPluginRegistryActive,
   markPluginRegistryRetired,
@@ -187,6 +190,40 @@ async function setup(persist = true) {
 }
 
 describe("Discord binding runtime ownership", () => {
+  it("refuses retired touches with a bound operation source without disabling persistence", async () => {
+    const { state, foreign, owner, manager, stored, snapshot } = await setup();
+    await state.writeJson("operation-source/package.json", { name: "discord", type: "module" });
+    const source = await state.writeText("operation-source/index.ts", "");
+    const cache = createPluginCache();
+    onTestFinished(async () => {
+      expect((await retirePluginCache(cache)).failures).toEqual([]);
+    });
+    withPluginCache(cache, () =>
+      bindPluginInstanceModuleLoader({
+        instance: owner.instance,
+        rootDir: state.statePath("operation-source"),
+        source,
+        origin: "config",
+      }),
+    );
+    expect(capturePluginStateOperationModuleSource(owner.instance, () => {})).toBeDefined();
+    const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+    owner.retire();
+    const clock = vi.spyOn(Date, "now");
+    onTestFinished(() => clock.mockRestore());
+
+    for (const elapsed of [1_000, 30_000]) {
+      const at = original.lastActivityAt + elapsed;
+      clock.mockReturnValue(at);
+      await expect
+        .soft(foreign.run(() => manager.touchThread({ threadId: "thread-1", at })))
+        .resolves.toBeNull();
+      expect.soft(manager.getByThreadId("thread-1")).toEqual(original);
+      expect.soft(persistenceAvailable()).toBe(true);
+      expect(await stored()).toEqual(snapshot);
+    }
+  });
+
   it.each(
     (["throttled", "off", "unavailable"] as const).flatMap((persistence) =>
       [

@@ -472,8 +472,9 @@ export function createPluginStateRuntimeStores(
     openKeyedStoreV2: <T>(
       options: OpenAsyncKeyedStoreOptions,
       authority?: PluginStateActionAuthority,
-    ) =>
-      createPluginStateKeyedStoreV2<T>(
+    ) => {
+      assertActive();
+      return createPluginStateKeyedStoreV2<T>(
         pluginId,
         options,
         {
@@ -484,7 +485,8 @@ export function createPluginStateRuntimeStores(
           sessionEntryCurrent: authority?.sessionEntryCurrent,
         },
         captureModuleSource?.(),
-      ),
+      );
+    },
     openSyncKeyedStore: <T>(options: OpenKeyedStoreOptions) => {
       assertActive();
       warnPluginSdkDeprecation({
