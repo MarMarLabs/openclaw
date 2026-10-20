@@ -19,6 +19,7 @@ import {
   setActivePluginRegistry,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import * as sessionStore from "openclaw/plugin-sdk/session-store-runtime";
+import { recordDeliveredCommandExchange } from "openclaw/plugin-sdk/session-transcript-runtime";
 import type * as SessionTranscriptRuntime from "openclaw/plugin-sdk/session-transcript-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -73,8 +74,8 @@ function createConfig(): OpenClawConfig {
 function createHarness(
   threadBinding?: ThreadBindingRecord,
   pluginCommands: readonly PluginCommandNativeCandidate[] = [],
+  cfg: OpenClawConfig = createConfig(),
 ) {
-  const cfg = createConfig();
   let currentConfig = cfg;
   const readPolicy = createDiscordLivePolicyReader({
     cfg,
@@ -437,6 +438,75 @@ describe("plugin-bound thread", () => {
   afterEach(() => {
     clearPluginCommands();
     setActivePluginRegistry(createTestRegistry());
+  });
+
+  function codexBindingInteraction() {
+    return createInternalInteractionPayload({
+      ...interactionFor("status", THREAD),
+      type: InteractionType.ApplicationCommand,
+      data: {
+        id: "command1",
+        name: "codex",
+        type: 1,
+        options: [{ name: "input", type: ApplicationCommandOptionType.String, value: "binding" }],
+      },
+    });
+  }
+
+  it("uses the non-default channel route for status and the plugin command agent", async () => {
+    const cfg = createConfig();
+    cfg.agents = { ...cfg.agents, ownership: "explicit", entries: { main: {}, work: {} } };
+    cfg.bindings = [
+      { agentId: "work", match: { channel: "discord", peer: { kind: "channel", id: CHANNEL } } },
+    ];
+    harness = createHarness(
+      createPluginOwnedThreadBinding(),
+      createPluginCommandRuntime().listNativeCandidates("discord"),
+      cfg,
+    );
+    const routedSessionKey = `agent:work:discord:channel:${THREAD}`;
+    await harness.client.handleInteraction(interactionFor("status", THREAD));
+    expect(harness.status).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ sessionKey: routedSessionKey }),
+    );
+    expectFollowUp(harness, `Status for ${routedSessionKey}`);
+
+    await harness.client.handleInteraction(codexBindingInteraction());
+    expect(codexHandler).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ agentId: "work", sessionKey: routedSessionKey, args: "binding" }),
+    );
+    expect(harness.session).toHaveBeenCalledWith({
+      agentId: "work",
+      sessionKey: routedSessionKey,
+    });
+    expectFollowUp(harness, `codex:${routedSessionKey}`);
+    expect(recordDeliveredCommandExchange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "work",
+        sessionKey: routedSessionKey,
+        replyId: "plugin-reply",
+      }),
+    );
+  });
+
+  it("keeps the refusal when an agent-owned record and its session agent disagree", async () => {
+    // Do not turn an existing ownership mismatch into an admitted plugin command.
+    const boundSessionKey = "agent:work:subagent:bound";
+    harness = createHarness(
+      {
+        ...createPluginOwnedThreadBinding(),
+        targetKind: "subagent",
+        targetSessionKey: boundSessionKey,
+        agentId: "main",
+        metadata: {},
+      },
+      createPluginCommandRuntime().listNativeCandidates("discord"),
+    );
+    await expect(harness.client.handleInteraction(codexBindingInteraction())).rejects.toThrow(
+      'The agent-scoped session key belongs to "work", not "main".',
+    );
+    expect(codexHandler).not.toHaveBeenCalled();
+    expect(harness.session).toHaveBeenCalledWith({ agentId: "main", sessionKey: boundSessionKey });
   });
 
   it("routes native /status to the thread session", async () => {
