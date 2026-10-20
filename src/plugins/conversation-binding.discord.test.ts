@@ -1,10 +1,17 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { getSessionBindingService } from "openclaw/plugin-sdk/conversation-runtime";
 import {
   createPluginStateKeyedStoreV2ForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
+import {
+  getSessionEntryAsync,
+  resolveStorePath,
+  upsertSessionEntry,
+} from "openclaw/plugin-sdk/session-store-runtime";
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { readGlobalSingleton } from "../shared/global-singleton.js";
@@ -64,6 +71,13 @@ const { loadDiscordThreadBindingTestHarness, resetThreadBindingsForTests } =
     }>;
     resetThreadBindingsForTests: () => Promise<void>;
   }>({ pluginId: "discord", artifactBasename: "test-api.js" });
+const { DiscordThreadDeleteListener } = await loadBundledPluginFacade<{
+  DiscordThreadDeleteListener: new (
+    cfg: OpenClawConfig,
+    accountId: string,
+    logger: ReturnType<typeof createSubsystemLogger>,
+  ) => { handle: (data: { id: string }) => Promise<void> };
+}>({ pluginId: "discord", artifactBasename: "test-api.js" });
 const { createTestThreadBindingManager, installThreadBindingLifecycleTestHooks } =
   await loadDiscordThreadBindingTestHarness();
 const {
@@ -300,6 +314,56 @@ describe("Discord binding runtime ownership", () => {
     },
   );
 
+  it("keeps core activity touches best effort while the owner is retired before stop", async () => {
+    const { manager, owner, stored, snapshot } = await setup();
+    const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+    const binding = expectDefined(
+      await getSessionBindingService().resolveByConversationAsync(conversation),
+      "seed session binding",
+    );
+    owner.retire();
+    // Past the 15 s persist interval, so the touch opens the store.
+    const at = Date.now() + 30_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(at);
+    try {
+      await getSessionBindingService().touchAsync(
+        binding.bindingId,
+        undefined,
+        binding.conversation,
+      );
+    } finally {
+      clock.mockRestore();
+    }
+    expect(persistenceAvailable()).toBe(true);
+    expect(manager.getByThreadId("thread-1")).toEqual(original);
+    expect(await stored()).toEqual(snapshot);
+  });
+
+  it("closes the deleted thread's sessions while the owner is retired before stop", async () => {
+    const { manager, owner, stored, snapshot } = await setup();
+    const original = expectDefined(manager.getByThreadId("thread-1"), "seed binding");
+    const thread = {
+      agentId: "main",
+      sessionKey: "agent:main:discord:channel:parent-1:thread:thread-1",
+      storePath: resolveStorePath(undefined, { agentId: "main" }),
+    };
+    await upsertSessionEntry({
+      ...thread,
+      entry: { sessionId: "thread-session", updatedAt: 1_000 },
+    });
+    expect(await getSessionEntryAsync(thread)).toMatchObject({ sessionId: "thread-session" });
+    const logger = createSubsystemLogger("discord/test-thread-delete");
+    const logError = vi.spyOn(logger, "error").mockImplementation(() => {});
+    onTestFinished(() => logError.mockRestore());
+    owner.retire();
+    await new DiscordThreadDeleteListener({}, "default", logger).handle({ id: "thread-1" });
+    expect.soft(await getSessionEntryAsync(thread)).toBeUndefined();
+    expect.soft(logError).not.toHaveBeenCalled();
+    expect.soft(persistenceAvailable()).toBe(true);
+    expect.soft(manager.getByThreadId("thread-1")).toEqual(original);
+    expect(await stored()).toEqual(snapshot);
+  });
+
   const mutations = [
     { mode: "sync", operation: "touch" },
     { mode: "async", operation: "touch" },
@@ -379,6 +443,8 @@ describe("Discord binding runtime ownership", () => {
       const result = foreign.run(mutate);
       if (state === "stopped" && operation === "touch") {
         await expect(result).rejects.toThrow(/stopping|was retired/);
+      } else if (state === "retired-before-stop" && mode === "async" && operation === "touch") {
+        await expect(result).resolves.toBeNull();
       } else if (state === "retired-before-stop" && mode === "async") {
         await expect(result).rejects.toMatchObject({ code: "PLUGIN_STATE_RUNTIME_INACTIVE" });
       } else {

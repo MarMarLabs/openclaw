@@ -18,3 +18,4 @@ export const loadDiscordGatewayCaptureFixture = () =>
 export const loadDiscordThreadBindingTestHarness = () =>
   import("./src/monitor/thread-bindings.lifecycle.test-support.js");
 export { resetThreadBindingsForTests } from "./src/monitor/thread-bindings.test-support.js";
+export { DiscordThreadDeleteListener } from "./src/monitor/listeners.js";

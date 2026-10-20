@@ -4,6 +4,7 @@ import {
   resolveThreadBindingThreadName,
   unregisterSessionBindingAdapter,
 } from "openclaw/plugin-sdk/conversation-runtime";
+import { isPluginStateRuntimeInactiveError } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { normalizeAccountId } from "openclaw/plugin-sdk/routing";
 import {
   getRuntimeConfigSnapshot,
@@ -348,15 +349,23 @@ function createLoadedThreadBindingManager(
         }
         const { bindingKey, record: existingResult } = binding;
         const nextRecord = touchBindingRecord(existingResult, touchParams.at);
-        await commitBindingRecord({
-          runtime,
-          bindingKey,
-          previous: existingResult,
-          next: nextRecord,
-          persist: (touchParams.persist ?? persist) && shouldPersistAnyBindingState(),
-          minIntervalMs: THREAD_BINDING_TOUCH_PERSIST_MIN_INTERVAL_MS,
-          assertCurrent: assertManagerCurrent,
-        });
+        try {
+          await commitBindingRecord({
+            runtime,
+            bindingKey,
+            previous: existingResult,
+            next: nextRecord,
+            persist: (touchParams.persist ?? persist) && shouldPersistAnyBindingState(),
+            minIntervalMs: THREAD_BINDING_TOUCH_PERSIST_MIN_INTERVAL_MS,
+            assertCurrent: assertManagerCurrent,
+          });
+        } catch (error) {
+          // Activity is best effort. A retired owner must not fail the inbound turn.
+          if (isPluginStateRuntimeInactiveError(error)) {
+            return null;
+          }
+          throw error;
+        }
         return nextRecord;
       });
     },

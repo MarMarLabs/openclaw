@@ -2,7 +2,10 @@ import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
 import { enqueueKeyedTask } from "openclaw/plugin-sdk/keyed-async-queue";
-import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import {
+  isPluginStateRuntimeInactiveError,
+  type PluginStateKeyedStore,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import { danger } from "openclaw/plugin-sdk/runtime-env";
 import { enqueueRoutedSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
@@ -558,11 +561,18 @@ export class DiscordThreadDeleteListener {
       event: this.type,
       run: async () => {
         const threadId = data.id;
-        await getThreadBindingManager(this.accountId)?.unbindThread({
-          threadId,
-          reason: "thread-delete",
-          sendFarewell: false,
-        });
+        try {
+          await getThreadBindingManager(this.accountId)?.unbindThread({
+            threadId,
+            reason: "thread-delete",
+            sendFarewell: false,
+          });
+        } catch (err) {
+          // A retired owner refuses the unbind. The deleted thread's sessions still close.
+          if (!isPluginStateRuntimeInactiveError(err)) {
+            throw err;
+          }
+        }
         const count = await closeDiscordThreadSessions({
           cfg: this.cfg,
           threadId,
