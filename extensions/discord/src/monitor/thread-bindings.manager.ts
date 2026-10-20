@@ -105,11 +105,7 @@ function createLoadedThreadBindingManager(
   params: Parameters<typeof createThreadBindingManager>[0],
 ): ThreadBindingManager {
   const accountId = normalizeAccountId(params.accountId);
-  const existing = MANAGERS_BY_ACCOUNT_ID.get(accountId);
   rememberThreadBindingToken({ accountId, token: params.token });
-  if (existing) {
-    return existing;
-  }
 
   const persist = params.persist ?? shouldDefaultPersist();
   PERSIST_BY_ACCOUNT_ID.set(accountId, persist);

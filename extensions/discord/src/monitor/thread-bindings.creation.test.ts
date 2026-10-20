@@ -14,6 +14,7 @@ import {
   hoisted,
   installThreadBindingLifecycleTestHooks,
 } from "./thread-bindings.lifecycle.test-support.js";
+import { getThreadBindingToken } from "./thread-bindings.state.js";
 import { resetThreadBindingsForTests } from "./thread-bindings.test-support.js";
 import type { ThreadBindingRecord } from "./thread-bindings.types.js";
 
@@ -131,7 +132,7 @@ it("keeps current config and refreshed tokens after a retired manager stops agai
   const options = { accountId: "runtime", token: "token-old", cfg: startupCfg };
   const retired = await createTestThreadBindingManager(options);
   await retired.stop();
-  await createTestThreadBindingManager(options);
+  const previous = await createTestThreadBindingManager(options);
   const manager = await createTestThreadBindingManager({ ...options, token: "token-new" });
   await retired.stop();
   setRuntimeConfigSnapshot(cfg);
@@ -146,6 +147,9 @@ it("keeps current config and refreshed tokens after a retired manager stops agai
   expect(hoisted.createDiscordRestClient.mock.calls).toEqual([
     [{ accountId: "runtime", token: "token-new" }, cfg],
   ]);
+  await previous.stop();
+  expect(getThreadBindingToken("runtime")).toBe("token-new");
+  await manager.stop();
 });
 
 it.each([false, true])(
