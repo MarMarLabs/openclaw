@@ -67,7 +67,7 @@ export function drainThreadBindingMutations(): Promise<void> {
   return THREAD_BINDINGS_STATE.mutationTail;
 }
 
-function assertBindingRuntimeActive(runtime: PluginRuntime | null | undefined): void {
+export function assertBindingRuntimeActive(runtime: PluginRuntime | null | undefined): void {
   if (!runtime) {
     return;
   }

@@ -31,6 +31,7 @@ import {
   summarizeDiscordError,
 } from "./thread-bindings.discord-api.js";
 import {
+  assertBindingRuntimeActive,
   commitBindingRecord,
   updateBindingRecordSync,
   runThreadBindingMutation,
@@ -44,6 +45,7 @@ import { createThreadBindingSessionAdapter } from "./thread-bindings.session-ada
 import {
   BINDINGS_BY_THREAD_ID,
   forgetThreadBindingToken,
+  getThreadBindingRuntime,
   getThreadBindingToken,
   MANAGERS_BY_ACCOUNT_ID,
   PERSIST_BY_ACCOUNT_ID,
@@ -109,12 +111,24 @@ function createLoadedThreadBindingManager(
 ): ThreadBindingManager {
   const accountId = normalizeAccountId(params.accountId);
   const existing = MANAGERS_BY_ACCOUNT_ID.get(accountId);
-  rememberThreadBindingToken({ accountId, token: params.token });
-  if (existing) {
-    return existing;
-  }
-
   const runtime = getOptionalDiscordRuntime();
+  if (existing) {
+    try {
+      assertBindingRuntimeActive(getThreadBindingRuntime(existing));
+      rememberThreadBindingToken({ accountId, token: params.token });
+      return existing;
+    } catch (error) {
+      if (!isPluginStateRuntimeInactiveError(error) || !runtime) {
+        throw error;
+      }
+    }
+  }
+  assertBindingRuntimeActive(runtime);
+  // A timed-out provider may still hold the retired manager. Replace its registration,
+  // never its captured runtime, and let its identity-checked cleanup finish separately.
+  void existing?.stop();
+  rememberThreadBindingToken({ accountId, token: params.token });
+
   const persist = params.persist ?? shouldDefaultPersist();
   PERSIST_BY_ACCOUNT_ID.set(accountId, persist);
   const idleTimeoutMs = normalizeThreadBindingDurationMs(
