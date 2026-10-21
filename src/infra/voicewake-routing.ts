@@ -1,7 +1,7 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { normalizeAgentId } from "../routing/session-key.js";
-import { readConfigMachineState } from "../state/config-machine-state.js";
+import { readVoiceWakeMachineState } from "../state/config-machine-state-async.js";
 
 // Voice wake routing maps normalized wake phrases to an agent, session key, or
 // current session target and persists the mapping under state settings.
@@ -106,29 +106,14 @@ function normalizeVoiceWakeRoutingConfig(input: unknown): VoiceWakeRoutingConfig
 export async function loadVoiceWakeRoutingConfig(
   baseDir?: string,
 ): Promise<VoiceWakeRoutingConfig> {
-  const config = readConfigMachineState<VoiceWakeRoutingConfig>(
+  const config = await readVoiceWakeMachineState(
     VOICEWAKE_ROUTING_STATE_KEY,
     baseDir ? { env: { ...process.env, OPENCLAW_STATE_DIR: baseDir } } : {},
   );
-  return config ? normalizeVoiceWakeRoutingConfig(config) : { ...DEFAULT_ROUTING };
+  return config ? normalizeVoiceWakeRoutingConfig(config.value) : { ...DEFAULT_ROUTING };
 }
 
 type VoiceWakeResolvedRoute = { mode: "current" } | { agentId: string } | { sessionKey: string };
-
-function resolveVoiceWakeRouteTarget(
-  routeTarget: VoiceWakeRouteTarget | undefined,
-): VoiceWakeResolvedRoute {
-  if (routeTarget?.mode === "current") {
-    return { mode: "current" };
-  }
-  if (routeTarget?.agentId) {
-    return { agentId: routeTarget.agentId };
-  }
-  if (routeTarget?.sessionKey) {
-    return { sessionKey: routeTarget.sessionKey };
-  }
-  return { mode: "current" };
-}
 
 export function resolveVoiceWakeRouteByTrigger(params: {
   trigger: string | undefined;
@@ -138,5 +123,5 @@ export function resolveVoiceWakeRouteByTrigger(params: {
   const matched = normalizedTrigger
     ? params.config.routes.find((route) => route.trigger === normalizedTrigger)
     : undefined;
-  return resolveVoiceWakeRouteTarget(matched ? matched.target : params.config.defaultTarget);
+  return matched ? matched.target : params.config.defaultTarget;
 }
