@@ -49,6 +49,7 @@ import {
   getThreadBindingToken,
   MANAGERS_BY_ACCOUNT_ID,
   PERSIST_BY_ACCOUNT_ID,
+  THREAD_BINDINGS_STATE,
   ensureBindingsLoadedAsync,
   rememberThreadBindingToken,
   normalizeTargetKind,
@@ -626,6 +627,12 @@ function createLoadedThreadBindingManager(
     unregisterSessionBindingAdapter({ channel: "discord", accountId, adapter: predecessorAdapter });
   }
   SESSION_ADAPTERS_BY_MANAGER.set(manager, sessionBindingAdapter);
+  // Session-wide mutations queue on the current owner, so they must join its predecessor's work.
+  const predecessorTail =
+    predecessor && THREAD_BINDINGS_STATE.accountOperationTails.get(predecessor);
+  if (predecessorTail) {
+    THREAD_BINDINGS_STATE.accountOperationTails.set(manager, predecessorTail);
+  }
 
   MANAGERS_BY_ACCOUNT_ID.set(accountId, manager);
   return manager;

@@ -21,11 +21,16 @@ import { EMPTY_DISCORD_TEST_CONFIG } from "../test-support/config.js";
 import { installDiscordIngressTestRuntime } from "../test-support/ingress-runtime.js";
 import {
   autoBindSpawnedDiscordSubagent,
+  setThreadBindingIdleTimeoutBySessionKeyAsync,
+  setThreadBindingMaxAgeBySessionKeyAsync,
   unbindThreadBindingsBySessionKeyAsync,
 } from "./thread-bindings.lifecycle.js";
 import { createThreadBindingManager } from "./thread-bindings.manager.js";
 import { resetThreadBindingsForTests } from "./thread-bindings.test-support.js";
-import type { ThreadBindingRecord } from "./thread-bindings.types.js";
+import {
+  THREAD_BINDINGS_SWEEP_INTERVAL_MS,
+  type ThreadBindingRecord,
+} from "./thread-bindings.types.js";
 
 const THREAD = "111111111111111111";
 const PARENT = "222222222222222222";
@@ -322,3 +327,95 @@ it("drains native create without blocking another account's mutations or shutdow
   expect(manager.getByThreadId(THREAD)).toBeUndefined();
   expect(fixture.post).toHaveBeenCalledOnce();
 });
+
+it.each(["unbind", "idle", "max-age"] as const)(
+  "orders session %s behind an accepted create across two replacements",
+  async (mutation) => {
+    const held = holdNext(webhook);
+    fixture.post.mockImplementationOnce(held.respond);
+    const target = { accountId: "default", targetSessionKey: "agent:main:subagent:joined" };
+    const binding = manager.bindTarget({
+      threadId: THREAD,
+      targetKind: "subagent",
+      targetSessionKey: target.targetSessionKey,
+      agentId: "main",
+    });
+    await held.paused;
+    const middle = await createManager();
+    const replacement = await createManager();
+    const mutated = vi.fn((records: ThreadBindingRecord[]) => records);
+    const updating = (
+      mutation === "unbind"
+        ? unbindThreadBindingsBySessionKeyAsync({ ...target, sendFarewell: false })
+        : mutation === "idle"
+          ? setThreadBindingIdleTimeoutBySessionKeyAsync({ ...target, idleTimeoutMs: 12_345 })
+          : setThreadBindingMaxAgeBySessionKeyAsync({ ...target, maxAgeMs: 23_456 })
+    ).then(mutated);
+    const stopped = vi.fn<() => void>();
+    const stopping = replacement.stop().then(stopped);
+    try {
+      // A full turn lets an incorrectly detached queue finish before the accepted create.
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(mutated).not.toHaveBeenCalled();
+      expect(stopped).not.toHaveBeenCalled();
+    } finally {
+      held.release();
+      await Promise.allSettled([binding, updating, stopping]);
+      await Promise.all([manager.stop(), middle.stop()]);
+    }
+    await expect(binding).resolves.toMatchObject({ targetSessionKey: target.targetSessionKey });
+    await expect(updating).resolves.toHaveLength(1);
+    if (mutation === "unbind") {
+      expect(replacement.getByThreadId(THREAD)).toBeUndefined();
+    } else {
+      expect(replacement.getByThreadId(THREAD)).toMatchObject(
+        mutation === "idle" ? { idleTimeoutMs: 12_345 } : { maxAgeMs: 23_456 },
+      );
+    }
+  },
+);
+
+it.each(["before", "after"] as const)(
+  "does not join a predecessor stop begun %s replacement while its sweep is pending",
+  async (order) => {
+    await manager.stop();
+    vi.useFakeTimers();
+    const held = holdNext(threadChannel);
+    let stopping: Promise<void> | undefined;
+    try {
+      manager = await createManager({ enableSweeper: true });
+      await manager.bindTarget({
+        threadId: THREAD,
+        channelId: PARENT,
+        targetKind: "subagent",
+        targetSessionKey: sessionKey,
+        webhookId: webhook.id,
+        webhookToken: webhook.token,
+      });
+      fixture.get.mockImplementationOnce(held.respond);
+      await vi.advanceTimersByTimeAsync(THREAD_BINDINGS_SWEEP_INTERVAL_MS);
+      await held.paused;
+      const stopped = vi.fn<() => void>();
+      if (order === "before") {
+        stopping = manager.stop().then(stopped);
+      }
+      const replacement = await createManager();
+      if (order === "after") {
+        stopping = manager.stop().then(stopped);
+      }
+      const at = Date.now() + 1000;
+      await expect(replacement.touchThread({ threadId: THREAD, at })).resolves.toMatchObject({
+        lastActivityAt: at,
+      });
+      await replacement.stop();
+      expect(stopped).not.toHaveBeenCalled();
+    } finally {
+      held.release();
+      await stopping;
+      await manager.stop();
+      vi.useRealTimers();
+    }
+  },
+);
