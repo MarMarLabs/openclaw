@@ -83,7 +83,7 @@ export function createFeishuTableRouting(params: {
     // The body a card close would write, which is what the limit has to be asked about.
     const cardText =
       projectedReasoning === undefined ? rawText : input.combine(projectedReasoning, input.answer);
-    const authoredText = input.combine(input.reasoning, input.authoredAnswer);
+    const authoredText = input.combine(input.authoredReasoning, input.authoredAnswer);
     // A close writes the whole projection in one go and cannot cut it into several, so a
     // conversion past the limit the settled answer is held to takes the post path here
     // for the same reason the preview stands down for it. The card carries the reasoning

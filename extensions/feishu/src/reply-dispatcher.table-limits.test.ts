@@ -302,6 +302,14 @@ describe("createFeishuReplyDispatcher table limits", () => {
     await delivery?.finalization;
   }
   const tableMarkdown = "| Name | Role |\n| --- | --- |\n| Ada | Lead |";
+  async function useRealMarkdownChunker() {
+    const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
+      "openclaw/plugin-sdk/reply-chunking",
+    );
+    getFeishuRuntimeMock().channel.text.chunkMarkdownTextWithMode.mockImplementation(
+      chunking.chunkMarkdownTextWithMode,
+    );
+  }
   // GFM makes the outer pipes optional, and a fence hides rows that only look like a table.
   const pipelessTableMarkdown = "Name | Role\n--- | ---\nAda | Lead";
   const fencedTableSample = "```\n| Name | Role |\n| --- | --- |\n| Ada | Lead |\n```";
@@ -864,12 +872,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   // carries its fences. Asking whether this step produced them answered nothing, and a
   // quoted table then reached separate messages with unmatched markers.
   it("posts a quoted table as authored when the cut cannot carry its fences", async () => {
-    const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
-      "openclaw/plugin-sdk/reply-chunking",
-    );
-    getFeishuRuntimeMock().channel.text.chunkMarkdownTextWithMode.mockImplementation(
-      chunking.chunkMarkdownTextWithMode,
-    );
+    await useRealMarkdownChunker();
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",
       appId: "app_id",
@@ -932,66 +935,65 @@ describe("createFeishuReplyDispatcher table limits", () => {
   // still write a card past it, which is the message the preview was already refusing.
   // Only the projection answers to this, so the authored half below still closes on the
   // card: text the author wrote long streams the way it always has.
-  it("closes the whole projected body through a post, not the answer half alone", async () => {
-    const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
-    const half = [
-      "| name | detail |",
-      "| --- | --- |",
-      ...Array.from({ length: 20 }, (_entry, index) => `| row${index} | d |`),
-      `| wide | ${"w".repeat(100)} |`,
-    ].join("\n");
-    // Guard the fixture: each half projects inside the limit and the two together do not,
-    // so the close decides on the body it writes rather than on either half.
-    expect(convert(half, "code").length).toBeLessThanOrEqual(4000);
-    expect(convert(half, "code").length * 2).toBeGreaterThan(4000);
-
-    const projected = createBlockTableHarness(tableCfg("code"), true);
-    projected.result.replyOptions.onReasoningStream?.({ text: half });
-    expect(streamingInstances).toHaveLength(1);
-    projected.result.replyOptions.onPartialReply?.({ text: half });
-    await projected.options.onIdle?.();
-
-    expect(requireStreamingInstance(0).closeWithResult).not.toHaveBeenCalled();
-    expect(requireStreamingInstance(0).discard).toHaveBeenCalledTimes(1);
-    expect(sendMessageFeishuMock).toHaveBeenCalled();
-
-    // An answer with nothing to convert leaves the reasoning the preview already projected as
-    // the only conversion in the body, and the close has to see that one too.
-    sendMessageFeishuMock.mockClear();
-    const plainAnswer = "p".repeat(2_000);
-    // Guard the fixture: the authored reasoning fits beside that answer, the projection does not.
-    expect(half.length * 2 + plainAnswer.length).toBeLessThanOrEqual(4000);
-    expect(convert(half, "code").length + plainAnswer.length).toBeGreaterThan(4000);
-
-    const plain = createBlockTableHarness(tableCfg("code"), true);
-    plain.result.replyOptions.onReasoningStream?.({ text: half });
-    expect(streamingInstances).toHaveLength(2);
-    plain.result.replyOptions.onPartialReply?.({ text: plainAnswer });
-    await plain.options.onIdle?.();
-
-    expect(requireStreamingInstance(1).closeWithResult).not.toHaveBeenCalled();
-    expect(requireStreamingInstance(1).discard).toHaveBeenCalledTimes(1);
-    expect(sendMessageFeishuMock).toHaveBeenCalled();
-
-    sendMessageFeishuMock.mockClear();
-    const authoredReasoning = "r".repeat(2_000);
-    const authoredAnswer = "a".repeat(2_500);
-    // Guard the fixture: nothing here converts, and the combined body is past the limit
-    // for reasons the table mode had no hand in.
-    expect(convert(authoredReasoning, "code")).toBe(authoredReasoning);
-    expect(convert(authoredAnswer, "code")).toBe(authoredAnswer);
-    expect(authoredReasoning.length + authoredAnswer.length).toBeGreaterThan(4000);
-
-    const authored = createBlockTableHarness(tableCfg("code"), true);
-    authored.result.replyOptions.onReasoningStream?.({ text: authoredReasoning });
-    expect(streamingInstances).toHaveLength(3);
-    authored.result.replyOptions.onPartialReply?.({ text: authoredAnswer });
-    await authored.options.onIdle?.();
-
-    expect(requireStreamingInstance(2).closeWithResult).toHaveBeenCalledTimes(1);
-    expect(requireStreamingInstance(2).discard).not.toHaveBeenCalled();
-    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-  });
+  it.each(["table", "plain", "authored"] as const)(
+    "closes the whole projected body through a post, not the answer half alone (%s)",
+    async (answerKind) => {
+      await useRealMarkdownChunker();
+      const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
+      const half = [
+        // Post soft breaks grow the quoted prose enough to cut the projected table's fence.
+        ...Array.from({ length: 250 }, () => "r"),
+        "",
+        "| name | detail |",
+        "| --- | --- |",
+        ...Array.from({ length: 20 }, (_entry, index) => `| row${index} | d |`),
+        `| wide | ${"w".repeat(100)} |`,
+      ].join("\n");
+      const reasoning = answerKind === "authored" ? "r".repeat(2_000) : half;
+      const answer = { table: half, plain: "p".repeat(2_000), authored: "a".repeat(2_500) }[
+        answerKind
+      ];
+      // Only table projection causes post recovery; authored-long text still closes on a card.
+      if (answerKind === "authored") {
+        expect(convert(reasoning, "code")).toBe(reasoning);
+        expect(convert(answer, "code")).toBe(answer);
+        expect(reasoning.length + answer.length).toBeGreaterThan(4000);
+      } else {
+        expect(half.length * 2 + answer.length).toBeLessThanOrEqual(4000);
+        expect(convert(half, "code").length + convert(answer, "code").length).toBeGreaterThan(4000);
+      }
+      const { result, options } = createBlockTableHarness(tableCfg("code"), true);
+      result.replyOptions.onReasoningStream?.({ text: reasoning });
+      expect(streamingInstances).toHaveLength(1);
+      const streaming = requireStreamingInstance(0);
+      await streaming.updated.promise;
+      const preview = streamingUpdateTexts(0).join("");
+      expect(preview.length).toBeLessThanOrEqual(4000);
+      result.replyOptions.onPartialReply?.({ text: answer });
+      await options.onIdle?.();
+      if (answerKind === "authored") {
+        expect(streaming.closeWithResult).toHaveBeenCalledTimes(1);
+        expect(streaming.discard).not.toHaveBeenCalled();
+        expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+      } else {
+        expect(preview).toContain("> ```");
+        expect(streaming.closeWithResult).not.toHaveBeenCalled();
+        expect(streaming.discard).toHaveBeenCalledTimes(1);
+        expect(sendMessageFeishuMock).toHaveBeenCalled();
+        const posts = sendMessageFeishuMock.mock.calls.map((call) => String(call[0]?.text ?? ""));
+        for (const post of posts) {
+          expect((post.match(/^> ```/gmu) ?? []).length % 2).toBe(0);
+        }
+        const recovered = posts.join("");
+        expect(recovered).toContain("> r  \n> r");
+        expect(recovered).toContain("> | row19 | d |");
+        expect(recovered).toContain(`> | wide | ${"w".repeat(100)} |`);
+        if (answerKind === "plain") {
+          expect(recovered).toContain(answer);
+        }
+      }
+    },
+  );
 
   // Reasoning shares the card with the answer, and its own conversion can outgrow the
   // limit the answer preview answers to. It gives way to the text as authored there.
@@ -1027,12 +1029,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   // The lifecycle records the reported content as what the reader received, so a fallback
   // that sends the authored table has to report the authored table.
   it("reports the text it posted when the conversion gave way to the authored table", async () => {
-    const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
-      "openclaw/plugin-sdk/reply-chunking",
-    );
-    getFeishuRuntimeMock().channel.text.chunkMarkdownTextWithMode.mockImplementation(
-      chunking.chunkMarkdownTextWithMode,
-    );
+    await useRealMarkdownChunker();
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",
       appId: "app_id",
@@ -1101,12 +1098,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   // renderer sees them, so the authored form recorded for the cut has to come from the
   // authored presentation rather than from that projection, which already carries fences.
   it("posts the whole presentation when a refused card forces an unconvertible fallback", async () => {
-    const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
-      "openclaw/plugin-sdk/reply-chunking",
-    );
-    getFeishuRuntimeMock().channel.text.chunkMarkdownTextWithMode.mockImplementation(
-      chunking.chunkMarkdownTextWithMode,
-    );
+    await useRealMarkdownChunker();
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
     const fallback = forcedPresentationFallback();
     // The case only means anything while the conversion carries quoted markers, which a cut
@@ -1129,12 +1121,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   // fallback is delivered by the same chunker as any other post, so the content it reports
   // is whatever that chunker accepted, not the converted text the branch asked for.
   it("reports the presentation prose a forced fallback posted", async () => {
-    const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
-      "openclaw/plugin-sdk/reply-chunking",
-    );
-    getFeishuRuntimeMock().channel.text.chunkMarkdownTextWithMode.mockImplementation(
-      chunking.chunkMarkdownTextWithMode,
-    );
+    await useRealMarkdownChunker();
     const fallback = forcedPresentationFallback();
 
     const delivery = await fallback.deliver();
