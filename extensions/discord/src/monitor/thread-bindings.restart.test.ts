@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
-import { getSessionBindingService } from "openclaw/plugin-sdk/conversation-runtime";
+import {
+  getSessionBindingService,
+  testing as sessionBindingTesting,
+} from "openclaw/plugin-sdk/conversation-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { MutableDiscordGateway } from "./gateway-handle.js";
 import { createDiscordGatewaySupervisor } from "./gateway-supervisor.js";
 import {
@@ -26,12 +29,15 @@ const bind = () =>
   });
 
 installThreadBindingLifecycleTestHooks();
+// Other files in a shared worker can leave Discord adapters registered; teardown asserts our own.
+beforeEach(() => sessionBindingTesting.resetSessionBindingAdaptersForTests());
 afterEach(async () => {
   for (const manager of managers) {
     await manager.stop();
   }
   managers.length = 0;
   await resetThreadBindingsForTests();
+  sessionBindingTesting.resetSessionBindingAdaptersForTests();
   vi.useRealTimers();
 });
 
