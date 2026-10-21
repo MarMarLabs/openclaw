@@ -592,6 +592,14 @@ function createLoadedThreadBindingManager(
 
   if (params.enableSweeper !== false) {
     sweepTimer = setInterval(() => {
+      // Provider cleanup may never reach stop after handover, even with a sweep still pending.
+      if (MANAGERS_BY_ACCOUNT_ID.get(accountId) !== manager) {
+        if (sweepTimer) {
+          clearInterval(sweepTimer);
+          sweepTimer = null;
+        }
+        return;
+      }
       if (stopping || sweepPromise) {
         return;
       }

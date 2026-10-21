@@ -10,10 +10,12 @@ import { createDiscordGatewaySupervisor } from "./gateway-supervisor.js";
 import {
   bindTestThread,
   createTestThreadBindingManager,
+  hoisted,
   installThreadBindingLifecycleTestHooks,
 } from "./thread-bindings.lifecycle.test-support.js";
 import { getThreadBindingManager } from "./thread-bindings.manager.js";
 import { resetThreadBindingsForTests } from "./thread-bindings.test-support.js";
+import { THREAD_BINDINGS_SWEEP_INTERVAL_MS } from "./thread-bindings.types.js";
 
 const { runDiscordGatewayLifecycle } = await import("./provider.lifecycle.js");
 type LifecycleParams = Parameters<typeof runDiscordGatewayLifecycle>[0];
@@ -157,3 +159,62 @@ it("keeps the replacement live after the old stop, then tears down on its own st
     "manager is stopping",
   );
 });
+
+it.each(["idle", "pending"] as const)(
+  "retires %s sweepers while provider cleanup is blocked",
+  async (sweepState) => {
+    vi.useFakeTimers();
+    const probe = createDeferred<void>();
+    const cleanupEntered = createDeferred<void>();
+    const finishCleanup = createDeferred<void>();
+    const old = await createManager({ enableSweeper: true });
+    await bindTestThread(old);
+    const oldScans = vi.spyOn(old, "listBindings");
+    const oldLifecycle = startLifecycle(old, {
+      autoJoin: async () => {},
+      destroy: async () => {
+        cleanupEntered.resolve();
+        await finishCleanup.promise;
+      },
+    } as LifecycleParams["voiceManager"]);
+    try {
+      if (sweepState === "pending") {
+        hoisted.restGet.mockImplementationOnce(async () => {
+          await probe.promise;
+          return { id: "thread-1", type: 11, parent_id: "parent-1" };
+        });
+        await vi.advanceTimersByTimeAsync(THREAD_BINDINGS_SWEEP_INTERVAL_MS);
+        expect(oldScans).toHaveBeenCalledOnce();
+        expect(hoisted.restGet).toHaveBeenCalledOnce();
+      }
+      oldLifecycle.abort.abort();
+      await cleanupEntered.promise;
+      oldScans.mockClear();
+
+      const middle = await createManager({ enableSweeper: true });
+      const middleScans = vi.spyOn(middle, "listBindings");
+      const current = await createManager({ enableSweeper: true, idleTimeoutMs: 60_000 });
+      await expect(bind()).resolves.toMatchObject({ metadata: { idleTimeoutMs: 60_000 } });
+
+      await vi.advanceTimersByTimeAsync(2 * THREAD_BINDINGS_SWEEP_INTERVAL_MS);
+      expect(oldScans).not.toHaveBeenCalled();
+      expect(middleScans).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+      expect(old.isStopping()).toBe(false);
+      expect(current.getByThreadId(conversation.conversationId)).toBeUndefined();
+
+      probe.resolve();
+      finishCleanup.resolve();
+      await oldLifecycle.task;
+      await Promise.all([old.stop(), old.stop(), middle.stop(), middle.stop()]);
+      expect(getThreadBindingManager()).toBe(current);
+      await current.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      probe.resolve();
+      finishCleanup.resolve();
+      oldLifecycle.abort.abort();
+      await oldLifecycle.task;
+    }
+  },
+);
