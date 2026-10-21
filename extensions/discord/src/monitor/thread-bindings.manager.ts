@@ -489,7 +489,8 @@ function createLoadedThreadBindingManager(
           metadata: { ...previous?.metadata, ...bindParams.metadata },
         };
 
-        // A confirmed native create must be published even if its initiator was revoked in flight.
+        // A confirmed native create must be published even if its initiator was revoked or
+        // its manager was replaced in flight; the account's current owner serves the record.
         if (!nativeBindingCreated) {
           assertCurrent?.();
         }
@@ -500,8 +501,8 @@ function createLoadedThreadBindingManager(
             next: record,
             persist,
             assertCurrent: () => {
-              assertManagerCurrent();
               if (!nativeBindingCreated) {
+                assertManagerCurrent();
                 assertCurrent?.();
               }
             },

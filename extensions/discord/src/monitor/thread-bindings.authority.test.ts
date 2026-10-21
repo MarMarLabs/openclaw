@@ -13,8 +13,10 @@ import {
 import { clearRuntimeConfigSnapshot } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as discordRest from "../internal/rest.js";
+import { discordOutbound } from "../outbound-adapter.js";
 import { getDiscordRuntime } from "../runtime.js";
 import * as discordSend from "../send.js";
+import { createDiscordSendReceipt } from "../send.receipt.js";
 import { EMPTY_DISCORD_TEST_CONFIG } from "../test-support/config.js";
 import { installDiscordIngressTestRuntime } from "../test-support/ingress-runtime.js";
 import {
@@ -139,47 +141,121 @@ it.each(["channel-lookup", "webhook-create", "child-create"] as const)(
   },
 );
 
-it.each(["parent-lookup", "thread-create"] as const)(
-  "refuses direct native creates after a replacement registers during %s",
+function holdNext<T>(value: T) {
+  const paused = createDeferred<void>();
+  const release = createDeferred<void>();
+  const respond = async () => {
+    paused.resolve();
+    await release.promise;
+    return value;
+  };
+  return { paused: paused.promise, release: () => release.resolve(), respond };
+}
+
+const parentChannel = { id: PARENT, type: ChannelType.GuildText };
+const spawnChild = () =>
+  autoBindSpawnedDiscordSubagent({
+    cfg: EMPTY_DISCORD_TEST_CONFIG,
+    accountId: "default",
+    channel: "discord",
+    to: `channel:${PARENT}`,
+    childSessionKey: "agent:main:subagent:replaced",
+    agentId: "main",
+  });
+
+it("refuses direct native creates after a replacement registers during the parent lookup", async () => {
+  // The first lookup resolves the spawn target; createThreadDiscord reads the parent again.
+  const held = holdNext(parentChannel);
+  fixture.get.mockResolvedValueOnce(parentChannel).mockImplementationOnce(held.respond);
+  const binding = spawnChild();
+  await held.paused;
+  const replacement = await createManager();
+  held.release();
+  await expect(binding).resolves.toBeNull();
+  expect(fixture.post).not.toHaveBeenCalled();
+  expect(replacement.listBindings()).toEqual([]);
+  await manager.stop();
+});
+
+it("settles a thread Discord accepted before a replacement registered, without a new webhook", async () => {
+  const held = holdNext({ id: CHILD });
+  fixture.get.mockResolvedValueOnce(parentChannel).mockResolvedValueOnce(parentChannel);
+  fixture.post.mockImplementationOnce(held.respond);
+  const binding = spawnChild();
+  await held.paused;
+  const replacement = await createManager();
+  held.release();
+  // The accepted thread is published; the follow-up webhook is refused after the handover.
+  await expect(binding).resolves.toMatchObject({ threadId: CHILD, webhookId: undefined });
+  expect(fixture.post.mock.calls.map(([route]) => route)).toEqual([`/channels/${PARENT}/threads`]);
+  expect(replacement.getByThreadId(CHILD)).toMatchObject({
+    targetSessionKey: "agent:main:subagent:replaced",
+    webhookId: undefined,
+  });
+  const conversation = { channel: "discord", accountId: "default", conversationId: CHILD };
+  await expect(
+    getSessionBindingService().resolveByConversationAsync(conversation),
+  ).resolves.toMatchObject({ targetSessionKey: "agent:main:subagent:replaced" });
+  // Without a webhook, bound replies use the bot send path.
+  const sent = {
+    messageId: "reply-1",
+    channelId: CHILD,
+    receipt: createDiscordSendReceipt({
+      platformMessageIds: ["reply-1"],
+      channelId: CHILD,
+      kind: "text",
+    }),
+  };
+  fixture.bot.mockResolvedValueOnce(sent);
+  await discordOutbound.sendText?.({
+    cfg: EMPTY_DISCORD_TEST_CONFIG,
+    to: `channel:${PARENT}`,
+    text: "bound reply",
+    accountId: "default",
+    threadId: CHILD,
+  });
+  // The retired manager's intro stays suppressed; only the reply reaches the thread.
+  expect(fixture.webhook).not.toHaveBeenCalled();
+  expect(fixture.bot).toHaveBeenCalledExactlyOnceWith(
+    `channel:${CHILD}`,
+    "bound reply",
+    expect.objectContaining({ accountId: "default" }),
+  );
+  await manager.stop();
+});
+
+it.each(["channel-lookup", "webhook-create"] as const)(
+  "settles only a webhook create accepted before a replacement registered (%s)",
   async (replaceAt) => {
-    const paused = createDeferred<void>();
-    const release = createDeferred<void>();
-    const parent = { id: PARENT, type: ChannelType.GuildText };
-    const hold = async <T>(value: T) => {
-      paused.resolve();
-      await release.promise;
-      return value;
-    };
-    // The first lookup resolves the spawn target; createThreadDiscord reads the parent again.
-    fixture.get.mockResolvedValueOnce(parent);
-    if (replaceAt === "parent-lookup") {
-      fixture.get.mockImplementationOnce(() => hold(parent));
+    const accepted = replaceAt === "webhook-create";
+    const held = holdNext(accepted ? webhook : threadChannel);
+    if (accepted) {
+      fixture.post.mockImplementationOnce(held.respond);
     } else {
-      fixture.get.mockResolvedValueOnce(parent);
-      fixture.post.mockImplementationOnce(() => hold({ id: CHILD }));
+      fixture.get.mockImplementationOnce(held.respond);
     }
-    const binding = autoBindSpawnedDiscordSubagent({
-      cfg: EMPTY_DISCORD_TEST_CONFIG,
-      accountId: "default",
-      channel: "discord",
-      to: `channel:${PARENT}`,
-      childSessionKey: "agent:main:subagent:replaced",
+    const binding = manager.bindTarget({
+      threadId: THREAD,
+      targetKind: "subagent",
+      targetSessionKey: "agent:main:subagent:settled",
       agentId: "main",
     });
-    await paused.promise;
+    await held.paused;
     const replacement = await createManager();
-    release.resolve();
-    const [settled] = await Promise.allSettled([binding]);
-    // Only a create dispatched before the replacement may reach Discord.
+    held.release();
+    if (accepted) {
+      await expect(binding).resolves.toMatchObject({ webhookId: webhook.id });
+      expect(replacement.getByThreadId(THREAD)).toMatchObject({
+        targetSessionKey: "agent:main:subagent:settled",
+        webhookId: webhook.id,
+      });
+    } else {
+      await expect(binding).rejects.toThrow("Discord thread binding manager was retired");
+      expect(replacement.getByThreadId(THREAD)).toBeUndefined();
+    }
     expect(fixture.post.mock.calls.map(([route]) => route)).toEqual(
-      replaceAt === "parent-lookup" ? [] : [`/channels/${PARENT}/threads`],
+      accepted ? [`/channels/${PARENT}/webhooks`] : [],
     );
-    expect(settled).toMatchObject(
-      replaceAt === "parent-lookup"
-        ? { status: "fulfilled", value: null }
-        : { status: "rejected", reason: { message: "Discord thread binding manager was retired" } },
-    );
-    expect(replacement.listBindings()).toEqual([]);
     await manager.stop();
   },
 );
