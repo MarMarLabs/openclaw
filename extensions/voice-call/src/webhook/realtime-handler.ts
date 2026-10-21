@@ -55,7 +55,7 @@ import {
   resolveFinalTranscriptText,
   limitPartialUserTranscript,
 } from "./realtime-transcript-text.js";
-import type { StreamDisconnectLifecycle } from "./stream-disconnect-grace.js";
+import type { StreamDisconnectGrace } from "./stream-disconnect-grace.js";
 import { StreamFrameAdapter } from "./stream-frame-adapter.js";
 import { appendRecentTalkEventMetadata } from "./talk-event-metadata.js";
 
@@ -233,7 +233,7 @@ export class RealtimeCallHandler {
     private readonly manager: CallManager,
     private readonly resolveCallRegistration: ResolveRealtimeCallRegistration,
     private readonly servePath: string,
-    private readonly streamDisconnectLifecycle: StreamDisconnectLifecycle,
+    private readonly streamDisconnectLifecycle: StreamDisconnectGrace,
     private readonly coreConfig?: OpenClawConfig,
     private readonly holdOpeningMaxMs?: number,
   ) {}
@@ -1183,7 +1183,7 @@ export class RealtimeCallHandler {
     };
     const closeSession = session.close.bind(session);
     let sessionClosePromise: Promise<void> | undefined;
-    session.close = (): Promise<void> => {
+    const closeBridgeSession = (): Promise<void> => {
       if (sessionClosed) {
         return sessionClosePromise ?? Promise.resolve();
       }
@@ -1204,6 +1204,7 @@ export class RealtimeCallHandler {
       });
       return sessionClosePromise;
     };
+    session.close = closeBridgeSession;
 
     let bindingClosed = false;
     let bindingClosePromise: Promise<void> | undefined;
@@ -1214,7 +1215,7 @@ export class RealtimeCallHandler {
       bindingClosed = true;
       activity.close();
       const ownsCall = this.activeTelephonyBindingsByCallId.get(callId) === telephonyBinding;
-      const finishClose = () => {
+      const finishClose = async () => {
         const stillOwnsCall = this.activeTelephonyBindingsByCallId.get(callId) === telephonyBinding;
         if (stillOwnsCall) {
           this.activeTelephonyBindingsByCallId.delete(callId);
@@ -1227,19 +1228,8 @@ export class RealtimeCallHandler {
         if (ownsCall && stillOwnsCall && cause && cause !== "disconnect") {
           return emitCallEnd(cause);
         }
-        return Promise.resolve();
       };
-      let pending: Promise<void>;
-      try {
-        pending = Promise.resolve(session.close());
-      } catch (error) {
-        pending = Promise.reject(
-          error instanceof Error
-            ? error
-            : new Error("Realtime provider close failed", { cause: error }),
-        );
-      }
-      bindingClosePromise = pending.then(finishClose, async (error: unknown) => {
+      bindingClosePromise = closeBridgeSession().then(finishClose, async (error: unknown) => {
         console.warn(
           `[voice-call] Failed to close realtime bridge ${callSid}: ${formatErrorMessage(error)}`,
         );

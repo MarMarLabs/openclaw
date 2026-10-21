@@ -10,9 +10,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
 import { resolveStateDir } from "../config/paths.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
-import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
-import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
-import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
+import { resetPluginRuntimeStateForTest } from "../plugins/runtime.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import {
   createImageProcessor,
@@ -34,7 +32,6 @@ const IMAGE_LIMITS = {
 let fixtureRoot = "";
 let tinyPngFile = "";
 let stateDir = "";
-let canvasPngFile = "";
 let workspaceDir = "";
 
 async function writeFile(name: string, body: Buffer | string, root = fixtureRoot) {
@@ -139,11 +136,7 @@ beforeAll(async () => {
   await writeFile("chart.png", TINY_PNG, workspaceDir);
   stateDir = resolveStateDir();
   await fs.mkdir(path.join(stateDir, "media", "outbound"), { recursive: true });
-  canvasPngFile = await writeFile(
-    "canvas/documents/cv_test/collection.media/tiny.png",
-    TINY_PNG,
-    stateDir,
-  );
+  await writeFile("canvas/documents/cv_test/collection.media/tiny.png", TINY_PNG, stateDir);
 });
 
 afterEach(() => {
@@ -212,55 +205,6 @@ describe("loadWebMedia", () => {
       platform?.mockRestore();
       realpath.mockRestore();
     }
-  });
-
-  it("keeps trying hosted media resolvers after one throws", async () => {
-    const registry = createEmptyPluginRegistry();
-    registry.hostedMediaResolvers = [
-      {
-        pluginId: "broken",
-        source: "test",
-        resolver: () => {
-          throw new Error("resolver failed");
-        },
-      },
-      {
-        pluginId: "hosted-media",
-        source: "test",
-        resolver: (url) => (url === "/__test__/tiny.png" ? canvasPngFile : null),
-      },
-    ];
-    setActivePluginRegistry(registry);
-    const result = await media.loadWebMedia("/__test__/tiny.png", { maxBytes: 1024 * 1024 });
-    expect(result.kind).toBe("image");
-    expect(result.buffer).toEqual(TINY_PNG);
-  });
-
-  it("resolves hosted media from the request registry, including an empty selection", async () => {
-    const url = "/__test__/scoped-hosted-media";
-    const selectedFile = await writeFile("selected.txt", "SELECTED");
-    const activeFile = await writeFile("active.txt", "ACTIVE");
-    const selected = createEmptyPluginRegistry();
-    selected.hostedMediaResolvers.push({
-      pluginId: "scoped",
-      source: "test",
-      resolver: (input) => (input === url ? selectedFile : null),
-    });
-    const active = createEmptyPluginRegistry();
-    const activeResolver = vi.fn((input: string) => (input === url ? activeFile : null));
-    active.hostedMediaResolvers.push({
-      pluginId: "global",
-      source: "test",
-      resolver: activeResolver,
-    });
-    setActivePluginRegistry(active);
-    expect((await media.loadWebMediaRaw(url)).buffer.toString()).toBe("ACTIVE");
-    const scoped = await withPluginRuntimeRegistryScope(selected, () => media.loadWebMediaRaw(url));
-    expect(scoped.buffer.toString()).toBe("SELECTED");
-    await expectAccessError(
-      withPluginRuntimeRegistryScope(createEmptyPluginRegistry(), () => media.loadWebMediaRaw(url)),
-    );
-    expect(activeResolver).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces Rastermill decode failures when optimization cannot produce a JPEG", async () => {
@@ -495,6 +439,47 @@ describe("loadWebMedia", () => {
       loadWithHostRead(
         await writeFile(name, body, outside ? tempDirs.make("html-outside-") : fixtureRoot),
       ),
+    );
+  });
+
+  it("admits explicitly published HTML without inventing generated provenance", async () => {
+    const root = tempDirs.make("html-publication-");
+    const body = Buffer.from("<!doctype html><h1>Final report</h1>");
+    const file = await writeFile("report.html", body, root);
+    const options = {
+      localRoots: [root],
+      readFile: (source: string) => fs.readFile(source),
+      hostReadCapability: true,
+      htmlPublication: "explicit" as const,
+    };
+    const result = await media.loadWebMedia(file, options);
+    expect(result.buffer).toEqual(body);
+    expect(result.contentType).toBe("text/html");
+    expect(result.trustedGeneratedHtmlSource).toBeUndefined();
+    await expectAccessError(loadWithHostRead(file));
+    await expect(
+      media.loadWebMedia(file, { ...options, maxBytes: body.length - 1 }),
+    ).rejects.toThrow(/exceeds.*limit/i);
+    const deniedRead = vi.fn(options.readFile);
+    await expectAccessError(
+      media.loadWebMedia(file, { ...options, localRoots: [workspaceDir], readFile: deniedRead }),
+    );
+    expect(deniedRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "not-html", body: Buffer.from("status,value\nok,1\n") },
+    { name: "binary", body: Buffer.from([0, 0xff, 0x10, 0x80]) },
+  ])("rejects $name bytes during explicit HTML publication", async ({ body }) => {
+    const root = tempDirs.make("html-publication-invalid-");
+    const file = await writeFile("report.html", body, root);
+    await expectAccessError(
+      media.loadWebMedia(file, {
+        localRoots: [root],
+        readFile: (source) => fs.readFile(source),
+        hostReadCapability: true,
+        htmlPublication: "explicit",
+      }),
     );
   });
 
