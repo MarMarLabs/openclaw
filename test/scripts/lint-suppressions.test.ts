@@ -165,6 +165,8 @@ describe("production lint suppressions", () => {
         "scripts/e2e/parallels/host-command.ts|no-warning-comments|1",
         // The scheduling probe forwards native methods with the original call receiver through Reflect.apply.
         "scripts/lib/control-ui-resource-counts.ts|typescript/unbound-method|8",
+        // The Talk probe forwards native playback and analyser methods with their original receivers.
+        "scripts/lib/control-ui-talk-fixture.ts|typescript/unbound-method|2",
         "scripts/lib/plain-gh.mjs|no-warning-comments|1",
         "scripts/lib/sqlite-reliability-process.ts|typescript/prefer-promise-reject-errors|1",
         // The copy-count probe restores the native method after measurement.
@@ -190,6 +192,8 @@ describe("production lint suppressions", () => {
         "scripts/perf/pg-pool-hang.worker.mjs|typescript/unbound-method|1",
         // The provider probe forwards native methods with their original receivers.
         "scripts/perf/provider-request-prepare-measure.ts|typescript/unbound-method|3",
+        // Node worker ports have no browser target origin.
+        "scripts/perf/session-entry-patch-payload.ts|unicorn/require-post-message-target-origin|1",
         // The setup probe executes an expression from the same trusted source input it imports.
         "scripts/perf/session-history-reader-setup-measure.mjs|typescript/no-implied-eval|1",
         // The subscription probe forwards track with the original AsyncWorkScope receiver.
@@ -200,6 +204,8 @@ describe("production lint suppressions", () => {
         "scripts/perf/system-prompt-pool-retention.ts|unicorn/prefer-structured-clone|1",
         // The counts-only probe wraps toSorted and restores it in finally; timing uses native methods.
         "scripts/perf/tools-catalog-copy-measure.ts|no-extend-native|2",
+        // The browser probe forwards IndexedDB writes with each store receiver and restores both methods.
+        "scripts/perf/ui-streaming-render-measure.ts|typescript/unbound-method|2",
         // These owners sort only fresh private arrays, preserving their source collections.
         "src/agents/agent-bundle-lsp-env.ts|unicorn/no-array-sort|1",
         "src/agents/agent-bundle-mcp-runtime.ts|unicorn/prefer-add-event-listener|1",
