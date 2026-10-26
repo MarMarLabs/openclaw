@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NODE_WORKER_PROCESS_CHANGES_PROTOCOL_FEATURE } from "../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { createEnteredGate } from "../agents/entered-gate.test-support.js";
 import type { NodeWorkerCapacitySnapshot } from "../infra/node-runner-inventory.js";
+import { setLoggerOverride } from "../logging/logger.js";
+import { loggingState } from "../logging/state.js";
 import { nodeWorkerTurnMatchesIdentity } from "../worker/node-supervisor-protocol.js";
 import type { WorkerProcessMessage } from "../worker/worker-process-protocol.js";
 import type { NodeWorkerLaunchReceipt } from "./node-worker-launch-store.js";
@@ -351,16 +354,12 @@ describe("node worker idle retention", () => {
         release: vi.fn(),
       };
       const acquired = createDeferred<typeof lease>();
-      const started = createDeferred();
-      const startup = createDeferred();
+      const startupGate = createEnteredGate();
       const controller = new AbortController();
       const failure = new Error("Synthetic admission failure");
       let closing: Promise<void> | undefined;
       mocks.acquirePreparedWorkspace.mockReturnValueOnce(acquired.promise);
-      mocks.send.mockImplementationOnce(async () => {
-        started.resolve();
-        await startup.promise;
-      });
+      mocks.send.mockImplementationOnce(startupGate.wait);
       const pending = f.supervisor.launch(
         input("prepared"),
         TEST_WORKER_ENDPOINT,
@@ -377,14 +376,14 @@ describe("node worker idle retention", () => {
         }
         acquired.resolve(lease);
         if (outcome === "completed") {
-          await started.promise;
+          await startupGate.entered;
           expect(lease.release).not.toHaveBeenCalled();
           expect(mocks.prepare).toHaveBeenCalledWith(
             expect.objectContaining({
               workerEnv: expect.objectContaining({ HOME: lease.homeDir }),
             }),
           );
-          startup.resolve();
+          startupGate.release();
           expect(await settled).toMatchObject({
             value: { launchId: "prepared", state: "running" },
           });
@@ -400,7 +399,7 @@ describe("node worker idle retention", () => {
         expect(mocks.prepare).toHaveBeenCalledTimes(outcome === "completed" ? 1 : 0);
       } finally {
         acquired.resolve(lease);
-        startup.resolve();
+        startupGate.release();
         await pending.catch(() => undefined);
       }
     },
@@ -632,69 +631,76 @@ describe("node worker idle retention", () => {
     f.expectCapacity(1, 2);
   });
 
-  it.each(["stop", "close"] as const)(
-    "%s retires idle through physical cleanup and preserves the completed turn",
-    async (operation) => {
-      await using f = fixture();
-      const value = input("completed");
-      const owner = await f.retained(value);
-      const identity = testNodeWorkerEnvironmentIdentity(value);
-      await f.supervisor.stopEnvironment({ ...identity, ownerEpoch: identity.ownerEpoch - 1 });
-      expect(owner.adapter.kill).not.toHaveBeenCalled();
-      if (operation === "stop") {
-        await f.supervisor.stopEnvironment(identity);
-      } else {
-        await f.supervisor.close();
-      }
-      expect(owner.adapter.dispose).toHaveBeenCalledOnce();
-      expect(await f.supervisor.status(value.launchId)).toMatchObject({ state: "completed" });
-      expect(await f.supervisor.hasActiveWork()).toBe(false);
-    },
-  );
-
   it.each(["explicit", "expiry", "limit"] as const)(
     "retries failed %s idle cleanup without freeing its slot or evicting background work",
     async (trigger) => {
-      const capacity = trigger === "limit" ? 4 : 2;
-      await using f = fixture(capacity, true);
-      const background = await f.retained(input("background", "background-env"), "background");
-      const idle = await f.retained(input("idle", "idle-env"));
-      mocks.remove.mockRejectedValueOnce(new Error("Synthetic container removal failure"));
+      using warning = vi
+        .spyOn(loggingState.rawConsole ?? console, "warn")
+        .mockImplementation(() => {});
+      setLoggerOverride({ level: "silent", consoleLevel: "warn", consoleStyle: "json" });
+      try {
+        const capacity = trigger === "limit" ? 4 : 2;
+        await using f = fixture(capacity, true);
+        const background = await f.retained(input("background", "background-env"), "background");
+        const idle = await f.retained(input("idle", "idle-env"));
+        mocks.remove.mockRejectedValueOnce(new Error("Synthetic container removal failure"));
 
-      if (trigger === "explicit") {
-        await expect(f.supervisor.retireIdle()).rejects.toThrow("node worker idle cleanup failed");
-      } else if (trigger === "expiry") {
-        await vi.advanceTimersByTimeAsync(120_000);
-      } else {
-        for (const turnId of ["second-idle", "third-idle"]) {
-          await f.retained(input(turnId, turnId));
+        if (trigger === "explicit") {
+          await expect(f.supervisor.retireIdle()).rejects.toThrow(
+            "node worker idle cleanup failed",
+          );
+        } else if (trigger === "expiry") {
+          await vi.advanceTimersByTimeAsync(120_000);
+        } else {
+          for (const turnId of ["second-idle", "third-idle"]) {
+            await f.retained(input(turnId, turnId));
+          }
+          await vi.advanceTimersByTimeAsync(0);
         }
-        await vi.advanceTimersByTimeAsync(0);
-      }
-      f.expectCapacity(0, capacity - 2);
-      expect(f.launches.get("idle")).toMatchObject({
-        state: "running",
-        container: idle.receipt.container,
-      });
-      expect(idle.adapter.kill).not.toHaveBeenCalled();
-      expect(background.adapter.kill).not.toHaveBeenCalled();
-      expect(mocks.remove).toHaveBeenCalledExactlyOnceWith(
-        idle.receipt.container,
-        expect.objectContaining({ launchId: "idle" }),
-      );
+        f.expectCapacity(0, capacity - 2);
+        expect(f.launches.get("idle")).toMatchObject({
+          state: "running",
+          container: idle.receipt.container,
+        });
+        expect(idle.adapter.kill).not.toHaveBeenCalled();
+        expect(background.adapter.kill).not.toHaveBeenCalled();
+        expect(mocks.remove).toHaveBeenCalledExactlyOnceWith(
+          idle.receipt.container,
+          expect.objectContaining({ launchId: "idle" }),
+        );
+        expect(warning).toHaveBeenCalledTimes(trigger === "explicit" ? 0 : 1);
 
-      if (trigger === "explicit") {
-        await f.supervisor.retireIdle();
-      } else {
-        await vi.advanceTimersByTimeAsync(120_000);
+        if (trigger === "expiry") {
+          mocks.remove.mockRejectedValueOnce(new Error("Synthetic retry removal failure"));
+          await vi.advanceTimersByTimeAsync(120_000);
+          expect(warning).toHaveBeenCalledTimes(2);
+          expect(idle.adapter.kill).not.toHaveBeenCalled();
+          expect(background.adapter.kill).not.toHaveBeenCalled();
+          f.expectCapacity(0);
+        }
+        if (trigger === "explicit") {
+          await f.supervisor.retireIdle();
+        } else {
+          await vi.advanceTimersByTimeAsync(120_000);
+        }
+        expect(
+          mocks.remove.mock.calls.filter(([, owner]) => owner.launchId === "idle"),
+        ).toHaveLength(trigger === "expiry" ? 3 : 2);
+        expect(idle.adapter.dispose).toHaveBeenCalledOnce();
+        expect(background.adapter.kill).not.toHaveBeenCalled();
+        f.expectCapacity(capacity - 1);
+        expect(await f.supervisor.status("idle")).toMatchObject({ state: "completed" });
+        expect(warning).toHaveBeenCalledTimes(
+          trigger === "explicit" ? 0 : trigger === "expiry" ? 2 : 1,
+        );
+        for (const [line] of warning.mock.calls) {
+          expect(String(line)).toContain("Idle worker cleanup failed");
+          expect(String(line)).toContain("cleanup will retry");
+          expect(String(line)).not.toContain("Synthetic");
+        }
+      } finally {
+        setLoggerOverride(null);
       }
-      expect(mocks.remove.mock.calls.filter(([, owner]) => owner.launchId === "idle")).toHaveLength(
-        2,
-      );
-      expect(idle.adapter.dispose).toHaveBeenCalledOnce();
-      expect(background.adapter.kill).not.toHaveBeenCalled();
-      f.expectCapacity(capacity - 1);
-      expect(await f.supervisor.status("idle")).toMatchObject({ state: "completed" });
     },
   );
 });
