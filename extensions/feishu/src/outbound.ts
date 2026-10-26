@@ -439,7 +439,7 @@ async function deliverFeishuOutboundText(ctx: FeishuSendTextContext) {
 
   const card = readNativeFeishuCardJson(text);
   if (card) {
-    assertFeishuCardWithinEnvelope(card, "Feishu native card");
+    assertFeishuCardWithinEnvelope(card);
     return toFeishuOutboundResult(
       await reportFeishuOutboundDelivery(
         await sendCardFeishu({

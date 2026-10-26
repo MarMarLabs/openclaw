@@ -204,7 +204,7 @@ describe("createFeishuReplyDispatcher preview budget", () => {
     const result = createFeishuReplyDispatcher({
       cfg: {} as never,
       agentId: "agent",
-      runtime: {} as never,
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
       chatId: "oc_chat",
       sendTarget: "oc_chat",
       ...overrides,

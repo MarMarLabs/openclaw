@@ -58,33 +58,6 @@ const resolvePinnedHostnameWithPolicyMock = vi.hoisted(() =>
   }),
 );
 
-function mergeStreamingText(
-  previousText: string | undefined,
-  nextText: string | undefined,
-): string {
-  const previous = typeof previousText === "string" ? previousText : "";
-  const next = typeof nextText === "string" ? nextText : "";
-  if (!next) {
-    return previous;
-  }
-  if (!previous || next === previous) {
-    return next;
-  }
-  if (next.startsWith(previous) || next.includes(previous)) {
-    return next;
-  }
-  if (previous.startsWith(next) || previous.includes(next)) {
-    return previous;
-  }
-  const maxOverlap = Math.min(previous.length, next.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (previous.slice(-overlap) === next.slice(0, overlap)) {
-      return `${previous}${next.slice(overlap)}`;
-    }
-  }
-  return `${previous}${next}`;
-}
-
 vi.mock("./accounts.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./accounts.js")>()),
   resolveFeishuAccount: resolveFeishuAccountMock,
@@ -132,7 +105,6 @@ vi.mock("./typing.js", async (importOriginal) => ({
 vi.mock("./streaming-card.js", async (importOriginal) => {
   return {
     ...(await importOriginal<typeof import("./streaming-card.js")>()),
-    mergeStreamingText,
     FeishuStreamingSession: class {
       active = false;
       credentials: unknown;
@@ -253,7 +225,7 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
     const result = createFeishuReplyDispatcher({
       cfg: {} as never,
       agentId: "agent",
-      runtime: {} as never,
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
       chatId: "oc_chat",
       sendTarget: "oc_chat",
       ...overrides,
@@ -384,6 +356,51 @@ describe("createFeishuReplyDispatcher markdown table modes", () => {
     });
     return createDispatcherHarness({ accountId: "main", cfg, allowReasoningPreview });
   }
+
+  it.each(
+    (["off", "bullets", "code", "block"] as const).flatMap((tables) =>
+      (["final", "idle"] as const).map((settle) => ({ tables, settle })),
+    ),
+  )("preserves $tables tables across assistant messages on $settle", async ({ tables, settle }) => {
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("card", "partial", "feishu"));
+    const { result, options } = createDispatcherHarness({
+      accountId: "main",
+      cfg: tableCfg(tables),
+    });
+    expect(result.replyOptions.preserveProgressCallbackStartOrder).toBe(true);
+    result.replyOptions.onAssistantMessageStart?.();
+    result.replyOptions.onPartialReply?.({ text: tableMarkdown });
+    result.replyOptions.onAssistantMessageStart?.();
+    result.replyOptions.onPartialReply?.({ text: "Draft continuation." });
+    result.replyOptions.onPartialReply?.({ text: "Corrected continuation." });
+    await options.deliver({ text: "Corrected continuation." }, { kind: "block" });
+    const delivery =
+      settle === "final"
+        ? await options.deliver({ text: "Final continuation." }, { kind: "final" })
+        : undefined;
+    await options.onIdle?.();
+    const finalized = await delivery?.finalization;
+    const table = tables === "code" ? codeText : tables === "bullets" ? bulletsCard : tableMarkdown;
+    const continuation = settle === "final" ? "Final continuation." : "Corrected continuation.";
+    const expected = `${table}\n\n${continuation}`;
+    const instance = requireStreamingInstance(0);
+    if (tables === "off") {
+      expect(instance.closeWithResult).not.toHaveBeenCalled();
+      expect(instance.discard).toHaveBeenCalledTimes(1);
+      expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expected }),
+      );
+    } else {
+      expect(instance.closeWithResult).toHaveBeenCalledTimes(1);
+      expect(instance.closeWithResult).toHaveBeenCalledWith(expected, expect.any(Object));
+      expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    }
+    if (settle === "final") {
+      expect(finalized ?? delivery).toMatchObject({ visibleReplySent: true, content: expected });
+    }
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+  });
 
   it("off keeps the raw table on the post path", async () => {
     await deliverFinal("off", "off");

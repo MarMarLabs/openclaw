@@ -185,12 +185,9 @@ export function isFeishuCardWithinEnvelope(card: Record<string, unknown>): boole
   }
 }
 
-export function assertFeishuCardWithinEnvelope(
-  card: Record<string, unknown>,
-  label = "Feishu card",
-): void {
+export function assertFeishuCardWithinEnvelope(card: Record<string, unknown>): void {
   if (!isFeishuCardWithinEnvelope(card)) {
-    throw new Error(`${label} exceeds the 30 KB or 200-element API limit.`);
+    throw new Error("Feishu native card exceeds the 30 KB or 200-element API limit.");
   }
 }
 
@@ -613,7 +610,7 @@ function buildAdmittedPayloadCard(
     };
   }
   if (isNativeCard) {
-    assertFeishuCardWithinEnvelope(card, "Feishu native card");
+    assertFeishuCardWithinEnvelope(card);
     return markRenderedFeishuCard(card);
   }
   return cardAdmitted(card) ? markRenderedFeishuCard(card) : undefined;

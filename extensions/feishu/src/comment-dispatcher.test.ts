@@ -9,6 +9,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClawdbotConfig } from "../runtime-api.js";
+import { createFeishuTestRoute } from "./bot.test-support.js";
 import { handleFeishuCommentEvent } from "./comment-handler.js";
 import { setFeishuRuntime } from "./runtime.js";
 
@@ -55,6 +56,17 @@ async function raceWithNextMacrotask<T>(promise: Promise<T>): Promise<T | "pendi
     }),
   ]);
 }
+
+const commandButton = (label: string, command: string) => ({
+  label,
+  action: { type: "command" as const, command },
+});
+const buttons = (...items: Array<ReturnType<typeof commandButton>>) => ({
+  blocks: [{ type: "buttons" as const, buttons: items }],
+});
+const approve = buttons(commandButton("Approve", "/approve req_1"));
+const unavailable =
+  "> Interactive buttons are unavailable in Feishu document comments. You can type the command shown above manually.";
 
 describe("Feishu comment event reply delivery", () => {
   afterAll(() => {
@@ -110,15 +122,12 @@ describe("Feishu comment event reply delivery", () => {
       config: { current: () => cfg },
       channel: {
         routing: {
-          resolveAgentRoute: () => ({
-            agentId: "main",
-            channel: "feishu",
-            accountId: "main",
-            sessionKey: "agent:main:feishu:direct:ou_sender",
-            mainSessionKey: "agent:main:main",
-            lastRoutePolicy: "session",
-            matchedBy: "binding.channel",
-          }),
+          resolveAgentRoute: () =>
+            createFeishuTestRoute({
+              accountId: "main",
+              sessionKey: "agent:main:feishu:direct:ou_sender",
+              matchedBy: "binding.channel",
+            }),
         },
         text: {
           resolveTextChunkLimit: vi.fn(() => 4000),
@@ -133,10 +142,7 @@ describe("Feishu comment event reply delivery", () => {
   });
 
   it("sends final comment text without waiting for typing cleanup", async () => {
-    let resolveCleanup: (() => void) | undefined;
-    const cleanupPromise = new Promise<void>((resolve) => {
-      resolveCleanup = resolve;
-    });
+    const { promise: cleanupPromise, resolve: resolveCleanup } = Promise.withResolvers<void>();
     const cleanup = vi.fn(() => cleanupPromise);
     createCommentTypingReactionLifecycleMock.mockReturnValue({
       start: vi.fn(async () => {}),
@@ -185,40 +191,14 @@ describe("Feishu comment event reply delivery", () => {
       {
         text: "Review this",
         mediaUrl: "https://example.com/attachment.png",
-        presentation: {
-          blocks: [
-            {
-              type: "buttons" as const,
-              buttons: [
-                {
-                  label: "Approve",
-                  action: { type: "command" as const, command: "/approve req_1" },
-                },
-              ],
-            },
-          ],
-        },
+        presentation: approve,
       },
-      "Review this\n\n- Approve: `/approve req_1`\n\n> Interactive buttons are unavailable in Feishu document comments. You can type the command shown above manually.\n\nhttps://example.com/attachment.png",
+      `Review this\n\n- Approve: \`/approve req_1\`\n\n${unavailable}\n\nhttps://example.com/attachment.png`,
     ],
     [
       "legacy interactive command",
-      {
-        interactive: {
-          blocks: [
-            {
-              type: "buttons" as const,
-              buttons: [
-                {
-                  label: "Approve",
-                  action: { type: "command" as const, command: "/approve req_1" },
-                },
-              ],
-            },
-          ],
-        },
-      },
-      "- Approve: `/approve req_1`\n\n> Interactive buttons are unavailable in Feishu document comments. You can type the command shown above manually.",
+      { interactive: approve },
+      `- Approve: \`/approve req_1\`\n\n${unavailable}`,
     ],
     [
       "select option with an actionable command",
@@ -228,17 +208,12 @@ describe("Feishu comment event reply delivery", () => {
             {
               type: "select" as const,
               placeholder: "Choose deployment",
-              options: [
-                {
-                  label: "Deploy",
-                  action: { type: "command" as const, command: "/deploy staging" },
-                },
-              ],
+              options: [commandButton("Deploy", "/deploy staging")],
             },
           ],
         },
       },
-      "Choose deployment:\n- Deploy: `/deploy staging`\n\n> Interactive buttons are unavailable in Feishu document comments. You can type the command shown above manually.",
+      `Choose deployment:\n- Deploy: \`/deploy staging\`\n\n${unavailable}`,
     ],
     [
       "URL-only button without actionable guidance",

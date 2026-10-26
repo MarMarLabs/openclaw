@@ -46,7 +46,7 @@ import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js
 import { createFeishuReplySenders } from "./reply-senders.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { chunkFeishuCardMarkdown, sendCardFeishu } from "./send.js";
-import { FeishuStreamingSession, mergeStreamingText } from "./streaming-card.js";
+import { FeishuStreamingSession } from "./streaming-card.js";
 import { projectFeishuStreamingCardText, queueFeishuStreamingUpdate } from "./streaming-update.js";
 import { createFeishuTableRouting } from "./table-routing.js";
 import { resolveReceiveIdType } from "./targets.js";
@@ -209,14 +209,14 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         },
         onStartError: (err) =>
           logTypingFailure({
-            log: (message) => params.runtime.log?.(message),
+            log: (message) => params.runtime.log(message),
             channel: "feishu",
             action: "start",
             error: err,
           }),
         onStopError: (err) =>
           logTypingFailure({
-            log: (message) => params.runtime.log?.(message),
+            log: (message) => params.runtime.log(message),
             channel: "feishu",
             action: "stop",
             error: err,
@@ -279,7 +279,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   let statusLine = "";
   let modelWaitLine = "";
   let snapshotBaseText = "";
-  let lastSnapshotTextLength = 0;
   // Partial previews are replaceable; only committed final text may precede an error notice.
   let hasStreamingFinalText = false;
   const deliveredFinalTexts = new Set<string>();
@@ -389,42 +388,20 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       : display;
   };
 
-  const queueStreamingUpdate = (
-    nextText: string,
-    options?: {
-      dedupeWithLastPartial?: boolean;
-      mode?: "snapshot" | "delta";
-    },
-  ) => {
+  const queueStreamingUpdate = (nextText: string, mode: "snapshot" | "delta") => {
     if (!nextText) {
       return;
     }
     // Answer snapshots and mirrored blocks share authored text until display. Both arrival
     // orders must compare and merge that representation, never a rendered table.
-    if (options?.dedupeWithLastPartial && nextText === lastPartial) {
+    if (nextText === lastPartial) {
       return;
     }
-    if (options?.dedupeWithLastPartial) {
-      lastPartial = nextText;
-    }
-    const mode = options?.mode ?? "snapshot";
+    lastPartial = nextText;
     if (mode === "delta") {
       streamText = `${streamText}${nextText}`;
     } else {
-      const currentSnapshotText = snapshotBaseText
-        ? streamText.slice(snapshotBaseText.length)
-        : streamText;
-      const startsNewSnapshotBlock =
-        lastSnapshotTextLength >= 20 &&
-        nextText.length < lastSnapshotTextLength * 0.5 &&
-        !currentSnapshotText.includes(nextText);
-      if (startsNewSnapshotBlock) {
-        snapshotBaseText = streamText;
-        streamText = `${snapshotBaseText}${nextText}`;
-      } else {
-        streamText = `${snapshotBaseText}${mergeStreamingText(currentSnapshotText, nextText)}`;
-      }
-      lastSnapshotTextLength = nextText.length;
+      streamText = `${snapshotBaseText}${nextText}`;
     }
     const answerPreview = previewAnswerText();
     if (answerPreview !== undefined) {
@@ -456,7 +433,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       }
 
       const session = new FeishuStreamingSession(createFeishuClient(account), creds, (message) =>
-        params.runtime.log?.(`feishu[${account.accountId}] ${message}`),
+        params.runtime.log(`feishu[${account.accountId}] ${message}`),
       );
       streaming = session;
       try {
@@ -479,7 +456,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           account.accountId,
           Date.now() + STREAMING_START_FAILURE_BACKOFF_MS,
         );
-        params.runtime.error?.(
+        params.runtime.error(
           `feishu[${account.accountId}]: streaming start failed; using non-streaming card fallback for ${
             STREAMING_START_FAILURE_BACKOFF_MS / 1000
           }s: ${String(error)}`,
@@ -503,7 +480,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     statusLine = "";
     modelWaitLine = "";
     snapshotBaseText = "";
-    lastSnapshotTextLength = 0;
     hasStreamingFinalText = false;
   };
 
@@ -673,7 +649,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     });
     if (idleRequestedForReply) {
       void queueIdleSideEffects().catch((error: unknown) =>
-        params.runtime.error?.(
+        params.runtime.error(
           `feishu[${account.accountId}] late reply finalization failed: ${String(error)}`,
         ),
       );
@@ -746,8 +722,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     readVisibleReplySent: () => visibleReplySent,
     readReplyOutcome: () => replyOutcome,
     noVisibleReplyFallbackText: NO_VISIBLE_REPLY_FALLBACK_TEXT,
-    log: (message: string) => params.runtime.log?.(message),
-    error: (message: string) => params.runtime.error?.(message),
+    log: (message: string) => params.runtime.log(message),
+    error: (message: string) => params.runtime.error(message),
   });
 
   function queueIdleSideEffects(): Promise<void> {
@@ -854,7 +830,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       }
       if (pendingStreamingDeliveries.length > 0) {
         void queueIdleSideEffects().catch((error: unknown) =>
-          params.runtime.error?.(
+          params.runtime.error(
             `feishu[${account.accountId}] queued reply finalization failed: ${String(error)}`,
           ),
         );
@@ -1005,11 +981,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       // when their normal success bookkeeping could not run.
       visibleReplySent = true;
     }
-    params.runtime.error?.(
+    params.runtime.error(
       `feishu[${account.accountId}] ${info.kind} reply failed: ${String(error)}`,
     );
     await queueIdleSideEffects().catch((cleanupError: unknown) =>
-      params.runtime.error?.(
+      params.runtime.error(
         `feishu[${account.accountId}] reply error cleanup failed: ${String(cleanupError)}`,
       ),
     );
@@ -1067,15 +1043,16 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       // Reasoning retains its established formatted delivery. Answer snapshots
       // and mirrored blocks instead share unconverted prose.
       const streamSourceText = payload.isReasoning ? reply.text : sourceText;
-      // reply.text already carries the conversion, so only the stream text this merge
-      // reads still needs it, in the form the closing card, the closing record and the
-      // delivered-final set hold.
+      // Merge authored text across assistant-message boundaries before rendering, so
+      // the closing card and delivery receipts carry the same table projection.
       const text =
         info?.kind === "final" && !hasIndependentPresentation
-          ? mergeStreamingFinalText(
-              renderTables(streamText),
-              reply.text,
-              payload.isError === true && hasStreamingFinalText,
+          ? renderTables(
+              mergeStreamingFinalText(
+                streamText,
+                payload.isError ? streamSourceText : `${snapshotBaseText}${streamSourceText}`,
+                payload.isError === true && hasStreamingFinalText,
+              ),
             )
           : reply.text;
       // The body a final settles with can be the streamed answer merged with this payload, and
@@ -1085,7 +1062,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         info?.kind === "final" && !hasIndependentPresentation
           ? mergeStreamingFinalText(
               streamText,
-              authoredPayloadText,
+              payload.isError ? authoredPayloadText : `${snapshotBaseText}${authoredPayloadText}`,
               payload.isError === true && hasStreamingFinalText,
             )
           : authoredPayloadText;
@@ -1294,22 +1271,17 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               // Mirror block text into streamText so onIdle close still sends content.
               // A block repeating what the preview already streamed is compared on the
               // payload text both sides started from, so only new text is appended.
-              queueStreamingUpdate(streamSourceText, {
-                mode: "delta",
-                dedupeWithLastPartial: true,
-              });
+              queueStreamingUpdate(streamSourceText, "delta");
             }
             if (info?.kind === "final") {
               // Final payloads can be cumulative snapshots or independent
               // notices. Preserve both when the latter arrives after an answer.
               streamText = mergeStreamingFinalText(
                 streamText,
-                streamSourceText,
+                payload.isError ? streamSourceText : `${snapshotBaseText}${streamSourceText}`,
                 payload.isError === true && hasStreamingFinalText,
               );
               hasStreamingFinalText = true;
-              snapshotBaseText = "";
-              lastSnapshotTextLength = streamText.length;
               flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamDisplayText()));
             }
           }
@@ -1405,6 +1377,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     replyOptions: {
       onModelSelected,
       disableBlockStreaming: !coreBlockStreamingEnabled,
+      preserveProgressCallbackStartOrder: previewStreamingEnabled ? true : undefined,
       onPartialReply: previewStreamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {
@@ -1417,13 +1390,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             if (!cleaned) {
               return false;
             }
-            if (!answerTableNeedsPostPath(cleaned)) {
+            if (!answerTableNeedsPostPath(`${snapshotBaseText}${cleaned}`)) {
               startStreaming();
             }
-            queueStreamingUpdate(cleaned, {
-              dedupeWithLastPartial: true,
-              mode: "snapshot",
-            });
+            queueStreamingUpdate(cleaned, "snapshot");
             return false;
           }
         : undefined,
@@ -1481,6 +1451,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         : undefined,
       onAssistantMessageStart: previewStreamingEnabled
         ? () => {
+            // Snapshots cover one assistant message. Freeze earlier prose at the
+            // source boundary so tool continuations cannot replace it.
+            snapshotBaseText = streamText ? `${streamText}\n\n` : "";
+            lastPartial = "";
             modelWaitLine = "";
             return updateStreamingStatusLine("", false);
           }

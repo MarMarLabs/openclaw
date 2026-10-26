@@ -59,33 +59,6 @@ const resolvePinnedHostnameWithPolicyMock = vi.hoisted(() =>
   }),
 );
 
-function mergeStreamingText(
-  previousText: string | undefined,
-  nextText: string | undefined,
-): string {
-  const previous = typeof previousText === "string" ? previousText : "";
-  const next = typeof nextText === "string" ? nextText : "";
-  if (!next) {
-    return previous;
-  }
-  if (!previous || next === previous) {
-    return next;
-  }
-  if (next.startsWith(previous) || next.includes(previous)) {
-    return next;
-  }
-  if (previous.startsWith(next) || previous.includes(next)) {
-    return previous;
-  }
-  const maxOverlap = Math.min(previous.length, next.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (previous.slice(-overlap) === next.slice(0, overlap)) {
-      return `${previous}${next.slice(overlap)}`;
-    }
-  }
-  return `${previous}${next}`;
-}
-
 vi.mock("./accounts.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./accounts.js")>()),
   resolveFeishuAccount: resolveFeishuAccountMock,
@@ -133,7 +106,6 @@ vi.mock("./typing.js", async (importOriginal) => ({
 vi.mock("./streaming-card.js", async (importOriginal) => {
   return {
     ...(await importOriginal<typeof import("./streaming-card.js")>()),
-    mergeStreamingText,
     FeishuStreamingSession: class {
       active = false;
       credentials: unknown;
@@ -255,7 +227,7 @@ describe("createFeishuReplyDispatcher block table receipts", () => {
     const result = createFeishuReplyDispatcher({
       cfg: {} as never,
       agentId: "agent",
-      runtime: {} as never,
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
       chatId: "oc_chat",
       sendTarget: "oc_chat",
       ...overrides,
