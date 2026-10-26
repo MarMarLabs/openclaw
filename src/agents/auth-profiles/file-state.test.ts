@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { Worker } from "node:worker_threads";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { applyAgentDatabaseReaderRequest } from "../../infra/agent-database-readers.js";
+import * as directoryWatch from "../../infra/directory-watch-host.js";
 import { runOpenClawAgentPathWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db-cache.js";
 import {
@@ -16,23 +17,24 @@ import {
   readAuthProfileDatabaseIdentity,
   noteAuthProfileFileWrite,
   refreshAuthProfileFileState,
-  registerAuthProfileFileChangeListener,
+  authProfileFileChanges,
 } from "./file-state.js";
 import { runtimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
 import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
 
 const temporary = useAutoCleanupTempDirTracker(afterEach);
-const subscriptions: Array<() => void> = [];
+const publishFileChange = authProfileFileChanges.onChange;
 vi.mock("node:worker_threads", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:worker_threads")>()),
   isMainThread: true,
 }));
 
 afterEach(async () => {
-  subscriptions.splice(0).forEach((unsubscribe) => unsubscribe());
+  authProfileFileChanges.onChange = publishFileChange;
   runtimeAuthProfileRowsCache.clear();
   await closeOpenClawStateDatabaseAsync();
   vi.restoreAllMocks();
+  syncBuiltinESMExports();
   vi.useRealTimers();
 });
 
@@ -54,6 +56,19 @@ it.skipIf(process.platform === "win32")(
         throw new Error("Worker auth observation requested a row child");
       };
       fs.watch = () => { throw new Error("synthetic unavailable watcher"); };
+      // macOS admits hosted watchers by opening their directory before spawning.
+      const watchDirectories = new Set();
+      for (let current = workerData.directory; ; current = path.dirname(current)) {
+        watchDirectories.add(current);
+        if (path.dirname(current) === current) break;
+      }
+      const openSync = fs.openSync;
+      fs.openSync = (file, ...args) => {
+        if (process.platform === "darwin" && watchDirectories.has(file)) {
+          throw new Error("synthetic unavailable watcher");
+        }
+        return openSync(file, ...args);
+      };
       syncBuiltinESMExports();
       (async () => {
         const { register } = await import(workerData.loader);
@@ -84,7 +99,7 @@ it.skipIf(process.platform === "win32")(
         };
         const writer = create(databasePath, "worker-original");
         const changes = [];
-        let unsubscribe = () => {};
+        const publishChange = files.authProfileFileChanges.onChange;
         try {
           writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
           const acquired = acquireAuthProfileReadDatabase(databasePath, openSqliteReadOnlyDatabase);
@@ -95,7 +110,10 @@ it.skipIf(process.platform === "win32")(
             store("worker-original"), databasePath, workerData.directory, owner
           );
           snapshots.recordRuntimeAuthProfilePersistedStore(databasePath, store("worker-original"));
-          unsubscribe = files.registerAuthProfileFileChangeListener((change) => changes.push(change));
+          files.authProfileFileChanges.onChange = async (change) => {
+            await publishChange?.(change);
+            changes.push(change);
+          };
           writer.prepare("UPDATE auth_profile_state SET state_json = ?").run('{"lastGood":{"fixture":"fixture"}}');
           assert.ok(fs.statSync(databasePath + "-wal").size > 0);
           await runInDetachedAsyncContext(files.refreshAuthProfileFileState);
@@ -114,7 +132,7 @@ it.skipIf(process.platform === "win32")(
             status: "readable", raw: store("worker-replacement")
           });
         } finally {
-          unsubscribe();
+          files.authProfileFileChanges.onChange = publishChange;
           if (writer.isOpen) writer.close();
           snapshots.clearRuntimeAuthProfileStoreSnapshots();
           await closeOpenClawStateDatabaseAsync();
@@ -170,24 +188,20 @@ function disableWatcher() {
 }
 function nextChange(directory: string) {
   return new Promise<void>((resolve) => {
-    const unsubscribe = listen(directory, () => {
-      unsubscribe();
+    listen(directory, () => {
+      authProfileFileChanges.onChange = publishFileChange;
       resolve();
     });
   });
 }
 
-function listen(
-  directory: string,
-  listener: Parameters<typeof registerAuthProfileFileChangeListener>[0],
-) {
-  const unsubscribe = registerAuthProfileFileChangeListener((change) => {
+function listen(directory: string, listener: NonNullable<typeof authProfileFileChanges.onChange>) {
+  authProfileFileChanges.onChange = async (change) => {
+    await publishFileChange?.(change);
     if (change.directory === directory) {
       return listener(change);
     }
-  });
-  subscriptions.push(unsubscribe);
-  return unsubscribe;
+  };
 }
 
 function replaceFile(databasePath: string) {
@@ -222,6 +236,33 @@ it("rejects a swapped database before a privileged write even before observation
     }).toThrow("database target changed");
   });
   expect(write).not.toHaveBeenCalled();
+});
+
+it("ignores database content events but observes replacement and nameless invalidation", async () => {
+  const { databasePath } = fixture({ existing: true });
+  const watcher = Object.assign(new EventEmitter(), { close() {} });
+  const watch = vi.spyOn(directoryWatch, "watchDirectory").mockReturnValue(watcher);
+  const captured = captureAuthProfileFileIdentity(databasePath);
+  const changed = watch.mock.calls[0]![1];
+  const stat = vi.spyOn(fs.promises, "stat");
+  syncBuiltinESMExports();
+  for (let index = 0; index < 100; index++) {
+    changed("change", path.basename(databasePath));
+    changed("change", `${path.basename(databasePath)}-wal`);
+  }
+  await Promise.resolve();
+  expect(stat).not.toHaveBeenCalled();
+  replaceFile(databasePath);
+  const replaced = nextChange(path.dirname(databasePath));
+  changed("rename", path.basename(databasePath));
+  await replaced;
+  expect(() => captured.assertCurrent()).toThrow("database file identity changed");
+  const replacement = captureAuthProfileFileIdentity(databasePath);
+  fs.unlinkSync(databasePath);
+  const deleted = nextChange(path.dirname(databasePath));
+  changed("change");
+  await deleted;
+  expect(() => replacement.assertCurrent()).toThrow("database file identity changed");
 });
 
 it("publishes a first owner write immediately and keeps same-file writes from revoking identity", async () => {

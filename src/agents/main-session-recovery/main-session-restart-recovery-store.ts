@@ -62,6 +62,7 @@ import {
   type ExpectedRestartRecoveryTarget,
   mainSessionRecoveryLog,
   MAX_RECOVERY_RETRIES,
+  readInterruptedRunId,
 } from "./main-session-restart-recovery-shared.js";
 import { resolveRestartRecoveryDispatchTarget } from "./main-session-restart-recovery-target.js";
 
@@ -113,6 +114,8 @@ export async function recoverStore(params: {
   for (const { sessionKey, entry: loadedEntry } of entries) {
     let entry = loadedEntry;
     let completionSource: SessionSourceAssertion | undefined;
+    let executionSource: SessionSourceAssertion | undefined;
+    let releaseCompletionSource: (() => void) | undefined;
     const isRecoveryCandidate =
       !loadedEntry.mainRestartRecovery?.tombstone &&
       hasMainSessionRecoveryClaim(loadedEntry) &&
@@ -160,6 +163,16 @@ export async function recoverStore(params: {
       }
       const agentId = dispatchTarget.agentId;
       const target = { agentId, sessionKey, storePath: params.storePath };
+      const { getPrivateRequesterSettleRecoveryOwner } =
+        await import("../subagents/registry/subagent-registry.js");
+      const privateRecoveryOwner = await getPrivateRequesterSettleRecoveryOwner(
+        { ...target, canonicalKey: sessionKey, entry },
+        entry.restartRecoveryDeliverySourceRunId ?? readInterruptedRunId(entry),
+      );
+      if (privateRecoveryOwner === "owned") {
+        skip("already_handled");
+        continue;
+      }
       const workStartBlock = resolveSessionWorkStartBlock(
         sessionKey,
         entry,
@@ -395,8 +408,8 @@ export async function recoverStore(params: {
       // historical inputs without it still need the cohort failure settlement.
       if (
         !harnessCompletion &&
-        !entry.restartRecoveryOperatorSource &&
-        !requesterOrigin &&
+        (privateRecoveryOwner === "unrestorable" ||
+          (!entry.restartRecoveryOperatorSource && !requesterOrigin)) &&
         entry.restartRecoverySourceIngress === "internal" &&
         expectedRecoverySourceRunId?.startsWith("announce:requester-settle:")
       ) {
@@ -478,8 +491,37 @@ export async function recoverStore(params: {
       if (
         !recoverableHarnessCompletion &&
         !completionSource &&
+        !requesterOrigin &&
+        source !== "cron" &&
+        expectedRecoverySourceRunId &&
+        requiresDelegatedRecoverySource(entry, source, sessionKey)
+      ) {
+        const { prepareConsumedSessionSendSource } =
+          await import("../../gateway/session-send-recovery-source.js");
+        const recovered = await prepareConsumedSessionSendSource({
+          config: params.cfg,
+          target: {
+            ...target,
+            sessionId: entry.sessionId,
+            lifecycleRevision: entry.lifecycleRevision,
+          },
+          sourceRunId: expectedRecoverySourceRunId,
+          signal: params.signal,
+          assertCurrent: () => {
+            if (params.shouldContinue?.() === false) {
+              throw new Error("Session delivery restart recovery is no longer current");
+            }
+          },
+        });
+        completionSource = recovered?.source;
+        executionSource = recovered?.source;
+        releaseCompletionSource = recovered?.release;
+      }
+      if (
+        !recoverableHarnessCompletion &&
+        !completionSource &&
         (source === "cron" || !requesterOrigin) &&
-        requiresDelegatedRecoverySource(entry, source)
+        requiresDelegatedRecoverySource(entry, source, sessionKey)
       ) {
         const outcome = await finishDelegatedRestartRecovery({
           ...target,
@@ -488,6 +530,7 @@ export async function recoverStore(params: {
           gatewayRuntime: params.gatewayRuntime,
           observation: recoveryView.observation,
           reason: "delegated recovery sender authority is unavailable",
+          cronOwned: source === "cron",
           assertCurrent: () => {
             if (stopped()) {
               throw new Error("Delegated restart recovery stopped before settlement");
@@ -498,8 +541,8 @@ export async function recoverStore(params: {
           params.handledSessionKeys.add(resumeDedupeKey);
           decision = {
             decision: "settled",
-            reason: "delegated_authority_unavailable",
-            nextOwner: "none",
+            reason: source === "cron" ? "cron_interrupted" : "delegated_authority_unavailable",
+            nextOwner: source === "cron" ? "cron" : "none",
           };
           result.settled++;
         } else if (outcome === "notice_failed") {
@@ -573,6 +616,8 @@ export async function recoverStore(params: {
       if (stopped()) {
         return result;
       }
+      const releaseDispatchedCompletionSource = releaseCompletionSource;
+      releaseCompletionSource = undefined;
       const resumeResult = await resumeMainSession({
         ...target,
         canonicalSessionKey: dispatchSessionKey,
@@ -580,6 +625,8 @@ export async function recoverStore(params: {
         entry,
         observation: recoveryView.observation,
         completionSource,
+        executionSource,
+        releaseCompletionSource: releaseDispatchedCompletionSource,
         recoveryAttempt: recoveryView.nextAttempt,
         controllerInput: params.controllerInput,
         lane: params.lane,
@@ -632,6 +679,7 @@ export async function recoverStore(params: {
       );
       result.failed++;
     } finally {
+      releaseCompletionSource?.();
       if (isRecoveryCandidate && isMainRestartRecoveryCandidate(loadedEntry, sessionKey)) {
         mainSessionRecoveryLog.info(
           `main-session restart recovery candidate ${JSON.stringify({

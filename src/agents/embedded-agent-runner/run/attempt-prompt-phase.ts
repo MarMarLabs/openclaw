@@ -1,18 +1,24 @@
-import { formatErrorMessage } from "../../../infra/errors.js";
 import {
   mergeAgentRunAttemptTerminal,
   projectAgentRunAttemptTerminal,
   setAgentRunAttemptTerminalFailure,
   type AgentRunAttemptFailureSource,
 } from "../../agent-run-terminal-outcome.js";
-import { resolvePendingRuntimeContextReplay } from "../../internal-runtime-context.js";
+import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
+import {
+  buildAgentRunBlockedUserMessage,
+  runBeforeAgentRunGate,
+} from "../../harness/before-agent-run.js";
+import {
+  isOpenClawSystemUpdateMessage,
+  resolvePendingRuntimeContextReplay,
+} from "../../internal-runtime-context.js";
 import { agentSessionDeferThresholdCompaction } from "../../sessions/agent-session-types.js";
 import {
   createCompactionRequestBudget,
   type CompactionRequestBudget,
 } from "../../sessions/compaction/request-budget.js";
 import { withSessionManagerAppend } from "../../sessions/session-manager-append-admission.js";
-import { releasePendingAgentSteeringItems } from "../../subagents/registry/subagent-registry.js";
 import { prepareGooglePromptCacheStreamFn } from "../google-prompt-cache.js";
 import { log } from "../logger.js";
 import {
@@ -22,7 +28,6 @@ import {
 } from "../session-prompt-state.js";
 import { resolveEmbeddedAgentApiKey } from "../stream-resolution.js";
 import { createAbortableError, isOpenClawAbortableWrapper } from "./abortable.js";
-import { runEmbeddedAttemptBeforeAgentRun } from "./attempt-before-agent-run.js";
 import type { EmbeddedAttemptExecutionPhaseInput } from "./attempt-execution-types.js";
 import {
   prepareEmbeddedAttemptPromptAssembly,
@@ -44,10 +49,10 @@ import {
   isChatGPTV2CompactionEligible,
 } from "./chatgpt-v2-compaction.js";
 import type { MidTurnPrecheckRequest } from "./midturn-precheck.js";
+import { sessionMessagesContainIdempotencyKey } from "./pre-persisted-user-turn.js";
 import { estimateToolSchemaTokenPressure } from "./preemptive-compaction.js";
 import { prepareEmbeddedAttemptPromptExecution } from "./prompt-image-preparation.js";
 
-type PromptAssemblyResult = Awaited<ReturnType<typeof prepareEmbeddedAttemptPromptAssembly>>;
 type PromptPreflightState = Parameters<typeof prepareEmbeddedAttemptPromptPreflight>[0]["state"];
 
 export type EmbeddedAttemptPromptState = Pick<
@@ -128,7 +133,6 @@ export async function runEmbeddedAttemptPromptPhase(
   let systemPromptText = sessionRuntimeState.systemPromptText;
   const toolSearchCompacted = prepared.toolCatalog.toolSearch.compacted;
   let skipPromptSubmission = false;
-  let leasedSteering: PromptAssemblyResult["leasedSteering"];
   let providerBoundaryPrecheck: MidTurnPrecheckRequest | undefined;
   const providerCompactionAtRequestBoundary = isChatGPTV2CompactionEligible({
     config: attempt.config,
@@ -155,17 +159,6 @@ export async function runEmbeddedAttemptPromptPhase(
     promptState.contextBudgetStatus = state.contextBudgetStatus;
     promptState.preflightRecovery = state.preflightRecovery;
     setFailure(state.promptError, state.promptErrorSource);
-  };
-  const releaseLeasedSteering = async (error?: unknown) => {
-    if (!leasedSteering) {
-      return;
-    }
-    await releasePendingAgentSteeringItems({
-      runIds: leasedSteering.runIds,
-      leaseId: leasedSteering.leaseId,
-      error: error ? formatErrorMessage(error) : undefined,
-    });
-    leasedSteering = undefined;
   };
   const handleMidTurnPrecheckRequest = async (request: MidTurnPrecheckRequest) => {
     const outcome = await handleEmbeddedAttemptMidTurnPrecheck({
@@ -214,9 +207,6 @@ export async function runEmbeddedAttemptPromptPhase(
         );
         return refresh ? refresh(currentSystemPrompt) : currentSystemPrompt;
       },
-      setLeasedSteering: (lease) => {
-        leasedSteering = lease;
-      },
     });
     input.setup.prepStages.mark("prompt-build");
     systemPromptText = sessionRuntimeState.systemPromptText;
@@ -227,7 +217,6 @@ export async function runEmbeddedAttemptPromptPhase(
     }
     const { hookCtx, promptBuildPrependContext, promptBuildAppendContext } = promptAssembly;
     transcriptLeafId = promptAssembly.transcriptLeafId;
-    leasedSteering = promptAssembly.leasedSteering ?? leasedSteering;
 
     const promptContext = await prepareEmbeddedAttemptPromptContext({
       sessionVersion: sessionManager.getHeader()?.version,
@@ -257,24 +246,50 @@ export async function runEmbeddedAttemptPromptPhase(
     const { hookMessagesForCurrentPrompt, promptForModel, systemPromptForHook } = promptContext;
     sessionRuntimeState.prePromptMessageCount = promptContext.prePromptMessageCount;
     setCurrentUserTimestampOverride(promptContext.currentUserTimestampOverride);
-    const beforeAgentRunOutcome =
-      attempt.operation === "settled-tool-finalization"
-        ? undefined
-        : await runEmbeddedAttemptBeforeAgentRun({
-            attempt,
-            activeSession,
-            hookContext: hookCtx,
-            hookMessages: hookMessagesForCurrentPrompt,
-            hookRunner,
-            modelPrompt: promptForModel,
-            sessionManager,
-            systemPrompt: systemPromptForHook,
-            withOwnedTranscriptWrite,
-          });
-    if (beforeAgentRunOutcome) {
-      input.state.beforeAgentRunBlockedBy = beforeAgentRunOutcome.blockedBy;
-      setFailure(beforeAgentRunOutcome.promptError, "hook:before_agent_run");
-      skipPromptSubmission = true;
+    if (attempt.operation !== "settled-tool-finalization") {
+      const block = await runBeforeAgentRunGate(
+        hookRunner,
+        {
+          prompt: promptForModel,
+          systemPrompt: systemPromptForHook,
+          messages: hookMessagesForCurrentPrompt,
+          channelId: hookCtx.channelId,
+          accountId: attempt.agentAccountId,
+          senderId: attempt.senderId ?? undefined,
+          senderIsOwner: attempt.senderIsOwner,
+        },
+        hookCtx,
+      );
+      if (block) {
+        const redactedUserMessage = buildAgentRunBlockedUserMessage(attempt.runId, block);
+        if (
+          !sessionMessagesContainIdempotencyKey(
+            activeSession.messages,
+            redactedUserMessage.idempotencyKey,
+          )
+        ) {
+          try {
+            await withOwnedTranscriptWrite(() =>
+              withSessionManagerAppend(sessionManager, async () => {
+                await sessionManager.appendMessageAsync(redactedUserMessage);
+                sessionManager.flushPendingPersistence();
+              }),
+            );
+            activeSession.agent.state.messages = sanitizeCompactionReplayMessages(
+              sessionManager.buildSessionContext().messages,
+            );
+          } catch (err) {
+            log.warn(
+              `before_agent_run block: failed to persist redacted user message: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+        input.state.beforeAgentRunBlockedBy = block.blockedBy;
+        setFailure(new Error(block.message), "hook:before_agent_run");
+        skipPromptSubmission = true;
+      }
     }
 
     if (!skipPromptSubmission) {
@@ -371,7 +386,9 @@ export async function runEmbeddedAttemptPromptPhase(
         pendingImageCount: imageResult.images.length,
         // The SDK replaces the queued reservation at submission. Transient
         // installation remains separate because that carrier never enters its queue.
-        ...(appendOnlyRuntimeContext
+        ...(appendOnlyRuntimeContext ||
+        (promptContext.runtimeContextMessageForCurrentTurn &&
+          isOpenClawSystemUpdateMessage(promptContext.runtimeContextMessageForCurrentTurn))
           ? {
               pendingQueuedContextMessages: resolvePendingRuntimeContextReplay({
                 messages: activeSession.messages,
@@ -380,9 +397,9 @@ export async function runEmbeddedAttemptPromptPhase(
               }).pendingContextMessages,
             }
           : { pendingContextMessages }),
-        pendingAdditivePrompt: [promptBuildPrependContext, promptBuildAppendContext]
-          .filter(Boolean)
-          .join("\n\n"),
+        pendingAdditivePrompt: promptContext.isDispatchedCanonicalFallback
+          ? undefined
+          : [promptBuildPrependContext, promptBuildAppendContext].filter(Boolean).join("\n\n"),
         pendingUserIdempotencyKey,
       });
       attempt.onCompactionRequestBudget?.(compactionRequestBudget);
@@ -490,7 +507,6 @@ export async function runEmbeddedAttemptPromptPhase(
           : {}),
         onModelRequest: preparedStreamRuntime.cache.onModelRequest,
         images: imageResult.images,
-        ...(leasedSteering ? { leasedSteering } : {}),
         modelPrompt: promptContext.promptForModel,
         onFinalPromptText: (prompt) => {
           promptState.finalPromptText = prompt;
@@ -498,9 +514,6 @@ export async function runEmbeddedAttemptPromptPhase(
         assertHostActive: promptAssembly.assertHostActive,
         withTranscriptWrite,
         getUserTranscriptContexts: sessionRuntime.boundary.getUserTranscriptContexts,
-        onSteeringAcknowledged: () => {
-          leasedSteering = undefined;
-        },
         persistToolResultProjections: async () => {
           if (
             !isRawModelRun &&
@@ -538,8 +551,6 @@ export async function runEmbeddedAttemptPromptPhase(
         toolResultPromptProjectionState,
         trajectoryRecorder,
       });
-    } else {
-      await releaseLeasedSteering(state.promptError ?? "prompt submission skipped");
     }
     publishDispatchState(state);
   } catch (error) {
@@ -555,7 +566,6 @@ export async function runEmbeddedAttemptPromptPhase(
           source: "yield_cleanup",
         });
       },
-      releaseLeasedSteering,
       withOwnedTranscriptWrite,
       ...input.lifecycle.readYieldState(),
     });

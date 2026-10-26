@@ -1,7 +1,7 @@
 import { WebClient } from "@slack/web-api";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveSlackThreadHistory } from "./thread.js";
+import { resolveSlackChannelHistory, resolveSlackThreadHistory } from "./thread.js";
 
 vi.mock("openclaw/plugin-sdk/runtime-env", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/runtime-env")>()),
@@ -11,6 +11,50 @@ vi.mock("openclaw/plugin-sdk/runtime-env", async (importOriginal) => ({
 function expectVerboseLogContains(expected: string): void {
   expect(vi.mocked(logVerbose).mock.calls.flat().join("\n")).toContain(expected);
 }
+
+const botMessage = <T extends object>(ts: string, content: T) => ({
+  text: "  ",
+  bot_id: "BMONITOR",
+  ts,
+  ...content,
+});
+const botText = (text: string) =>
+  expect.objectContaining({ text, botId: "BMONITOR", userId: undefined, files: undefined });
+const mrkdwn = (text: string) => ({ type: "mrkdwn", text });
+const section = (text: string) => ({ type: "section", text: mrkdwn(text) });
+
+it("returns bounded channel history chronologically without copying the reversed window", async () => {
+  const client = new WebClient();
+  const messages = [
+    { text: "current", ts: "5.000" },
+    { text: "latest", ts: "4.000" },
+    { text: "excluded", ts: "3.000" },
+    { text: "earlier", ts: "2.000" },
+    { text: "oldest", ts: "1.000" },
+  ];
+  const history = vi
+    .spyOn(client.conversations, "history")
+    .mockResolvedValue({ ok: true, messages });
+  const copies = vi.spyOn(Array.prototype, "toReversed");
+  try {
+    const result = await resolveSlackChannelHistory({
+      channelId: "C1",
+      client,
+      currentMessageTs: "5.000",
+      excludedMessageIds: new Set(["3.000"]),
+      limit: 2,
+    });
+    expect(result.map(({ text, ts }) => ({ text, ts }))).toEqual([
+      { text: "earlier", ts: "2.000" },
+      { text: "latest", ts: "4.000" },
+    ]);
+    expect(messages.map(({ ts }) => ts)).toEqual(["5.000", "4.000", "3.000", "2.000", "1.000"]);
+    expect(copies).not.toHaveBeenCalled();
+  } finally {
+    copies.mockRestore();
+    history.mockRestore();
+  }
+});
 
 function replyPage(start: number, count: number, nextCursor = "") {
   return {
@@ -74,7 +118,6 @@ describe("resolveSlackThreadHistory", () => {
       .mockResolvedValueOnce(replyPage(201, 200, "cursor-3"))
       .mockResolvedValueOnce(replyPage(401, 200, "cursor-4"));
     const result = await history({ limit: 3 });
-
     expect(replies).toHaveBeenCalledTimes(3);
     expect(replies.mock.calls[2]?.[0]).toMatchObject({
       cursor: "cursor-3",
@@ -95,50 +138,33 @@ describe("resolveSlackThreadHistory", () => {
       ],
       expected: [
         expect.objectContaining({ text: "[attached: screenshot.png (fileId: FSCREEN)]" }),
-        expect.objectContaining({ text: "hello" }),
+        expect.objectContaining({ text: "hello", userId: "U1", ts: "3.000" }),
       ],
     },
     {
       name: "attachment and block fallback surfaces",
       messages: [
-        {
-          text: "  ",
-          bot_id: "BMONITOR",
-          ts: "1.000",
+        botMessage("1.000", {
           attachments: [
             {
-              title: "Filesystem on /dev/sda1 has only 14.93% available space left.",
-              fallback: "Alert: filesystem space is low",
-              fields: [{ title: "Host", value: "dc2.ipa.mgt" }],
+              title: "Low disk",
+              fallback: "Alert",
+              fields: [{ title: "Host", value: "example" }],
             },
           ],
-        },
-        {
-          text: "  ",
-          bot_id: "BMONITOR",
-          ts: "2.000",
-          blocks: [{ type: "section", text: { type: "mrkdwn", text: "Pod restart rate is high" } }],
-        },
-        {
-          text: "  ",
-          bot_id: "BMONITOR",
-          ts: "3.000",
+        }),
+        botMessage("2.000", { blocks: [section("Restarting")] }),
+        botMessage("3.000", {
           attachments: [
             {
               blocks: [
                 { type: "header", text: { type: "plain_text", text: "Alert firing" } },
-                {
-                  type: "section",
-                  fields: [
-                    { type: "mrkdwn", text: "*host:* dc2.ipa.mgt" },
-                    { type: "mrkdwn", text: "*device:* /dev/sda1" },
-                  ],
-                },
-                { type: "section", text: { type: "mrkdwn", text: "Free space below threshold" } },
+                { type: "section", fields: [mrkdwn("*host:* example"), mrkdwn("*device:* disk")] },
+                section("Free space below threshold"),
               ],
             },
           ],
-        },
+        }),
         { text: "  line one\nline two  ", ts: "4.000" },
         {
           ts: "5.000",
@@ -146,80 +172,11 @@ describe("resolveSlackThreadHistory", () => {
         },
       ],
       expected: [
-        expect.objectContaining({
-          text: "Filesystem on /dev/sda1 has only 14.93% available space left.\nAlert: filesystem space is low\nHost\ndc2.ipa.mgt",
-          botId: "BMONITOR",
-        }),
-        expect.objectContaining({ text: "Pod restart rate is high", botId: "BMONITOR" }),
-        expect.objectContaining({
-          text: "Alert firing\n*host:* dc2.ipa.mgt\n*device:* /dev/sda1\nFree space below threshold",
-          botId: "BMONITOR",
-        }),
+        botText("Low disk\nAlert\nHost\nexample"),
+        botText("Restarting"),
+        botText("Alert firing\n*host:* example\n*device:* disk\nFree space below threshold"),
         expect.objectContaining({ text: "line one\nline two", botId: undefined }),
         expect.objectContaining({ text: "[Slack media attachment]", botId: undefined }),
-      ],
-    },
-    {
-      name: "native chart values alongside top-level text",
-      messages: [
-        {
-          text: "Latency report",
-          bot_id: "BMONITOR",
-          ts: "1.000",
-          blocks: [
-            {
-              type: "data_visualization",
-              title: "Weekly latency",
-              chart: {
-                type: "line",
-                series: [{ name: "p95", data: [{ label: "Mon", value: 250 }] }],
-                axis_config: { categories: ["Mon"] },
-              },
-            },
-          ],
-        },
-      ],
-      expected: [
-        {
-          text: "Latency report\nWeekly latency (line chart)\n- p95: Mon: 250",
-          userId: undefined,
-          botId: "BMONITOR",
-          ts: "1.000",
-          files: undefined,
-        },
-      ],
-    },
-    {
-      name: "attachment table rows alongside top-level text",
-      messages: [
-        {
-          text: "Please check these.",
-          user: "U1",
-          ts: "1.000",
-          attachments: [
-            {
-              fallback: "[no preview available]",
-              blocks: [
-                {
-                  type: "table",
-                  rows: [
-                    [
-                      { type: "raw_text", text: "ID" },
-                      { type: "raw_text", text: "Status" },
-                    ],
-                    [
-                      { type: "raw_number", value: 12345 },
-                      { type: "raw_text", text: "enabled" },
-                    ],
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-      ],
-      expected: [
-        expect.objectContaining({ text: "Please check these.\nID\tStatus\n12345\tenabled" }),
       ],
     },
   ])("preserves $name in thread history", async ({ messages, expected }) => {

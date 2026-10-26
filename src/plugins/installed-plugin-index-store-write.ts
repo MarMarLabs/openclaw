@@ -4,13 +4,9 @@ import { isDeepStrictEqual } from "node:util";
 import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import {
-  createPluginInstallRecordMap,
   inspectPluginInstallRecordMap,
-  parsePluginInstallRecord,
   serializePluginInstallRecordMap,
-  setPluginInstallRecordMapEntry,
 } from "../config/plugin-install-record-map.js";
-import type { PluginInstallRecord } from "../config/types.plugins.js";
 import { resolveUserPath } from "../infra/home-dir.js";
 import {
   compileSqliteQueryBindings,
@@ -26,15 +22,11 @@ import { readOpenClawStateLease } from "../state/openclaw-state-lease-store.js";
 import type { OpenClawStateLeaseIdentity } from "../state/openclaw-state-lease.types.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { resolveCompatibilityHostVersion } from "../version.js";
-import { withBundledPluginEnablementCompat } from "./bundled-compat.js";
-import { isBundledProviderCompatPlugin } from "./bundled-provider-compat.js";
 import {
   isPluginCandidateInstallOwnerAmbiguous,
   resolvePluginCandidateInstallOwner,
 } from "./candidate-install-owner.js";
-import { normalizePluginsConfig, resolveEffectiveEnableState } from "./config-state.js";
 import { isGatewayPluginMetadataSnapshotActive } from "./current-plugin-metadata-state.js";
-import { isPluginEnabledByDefaultForPlatform } from "./default-enablement.js";
 import type { PluginCandidate } from "./discovery.types.js";
 import {
   resolveActivePluginInstallRoots,
@@ -67,6 +59,7 @@ import {
   INSTALLED_PLUGIN_INDEX_WARNING,
   INSTALLED_PLUGIN_INDEX_VERSION,
   INSTALLED_PLUGIN_INDEX_MIGRATION_VERSION,
+  projectInstalledPluginIndexPolicy,
   resolveInstalledPluginIndexPolicyHash,
   refreshInstalledPluginIndex,
   type InstalledPluginIndex,
@@ -183,18 +176,10 @@ function assertWritableInstalledPluginIndexStoreOptions(
 }
 
 function preparePersistedInstalledPluginIndex(index: InstalledPluginIndex): InstalledPluginIndex {
-  const installRecords = createPluginInstallRecordMap<PluginInstallRecord>();
-  for (const [pluginId, rawRecord] of Object.entries(index.installRecords)) {
-    const record = parsePluginInstallRecord(rawRecord);
-    if (!record) {
-      throw new Error("Invalid plugin install record");
-    }
-    setPluginInstallRecordMapEntry(installRecords, pluginId, record);
-  }
+  // Index construction and persisted-data ingress already normalize install records.
   return {
     ...index,
     warning: INSTALLED_PLUGIN_INDEX_WARNING,
-    installRecords,
   };
 }
 
@@ -278,7 +263,8 @@ export function writePersistedInstalledPluginIndexToSqlite(
     ({ db, path: databasePath }) => {
       const before = readInstalledPluginIndexRow(db);
       const previousRow = parseInstalledPluginIndexRow(before);
-      if (previousRow) {
+      const previous = previousRow ? parseInstalledPluginIndex(previousRow.index) : null;
+      if (previousRow && !previous) {
         // SAFETY: field probe on the stored value; inspectPluginInstallRecordMap validates it.
         const previousInstallRecords = (previousRow.index as { installRecords?: unknown } | null)
           ?.installRecords;
@@ -292,7 +278,6 @@ export function writePersistedInstalledPluginIndexToSqlite(
         }
       }
       lease.assertOwnedInTransaction(db);
-      const previous = previousRow ? parseInstalledPluginIndex(previousRow.index) : null;
       if (preserveAdmissions) {
         preservePluginSourceAdmissions(previous, persisted);
       }
@@ -363,7 +348,9 @@ export async function writePersistedInstalledPluginIndex(
   assertWritableInstalledPluginIndexStoreOptions(options);
   const captured = {
     ...options,
-    env: cloneEnvWithPlatformSemantics(options.env ?? process.env),
+    env: cloneEnvWithPlatformSemantics(
+      resolveInstalledPluginIndexStateDatabaseOptions(options).env ?? options.env ?? process.env,
+    ),
     filePath: resolveInstalledPluginIndexStorePath(options),
   };
   return await withPluginLifecycleLease(
@@ -533,37 +520,19 @@ function refreshPersistedPolicyState(
   persisted: InstalledPluginIndex,
   params: RefreshInstalledPluginIndexParams,
 ): InstalledPluginIndex {
-  const activationConfig = withBundledPluginEnablementCompat({
+  // Keep the existing ambient discovery-read behavior. Forwarding
+  // artifactPreservingReadOnly here would change this refresh's memo/snapshot scope.
+  const plugins = projectInstalledPluginIndexPolicy({
+    plugins: persisted.plugins,
     config: params.config,
-    env: params.env,
-    pluginIds: persisted.plugins
-      .filter((plugin) =>
-        isBundledProviderCompatPlugin({
-          origin: plugin.origin,
-          providers: plugin.contributions?.providers,
-          contracts: plugin.contributions?.contracts,
-        }),
-      )
-      .map((plugin) => plugin.pluginId),
-    activation: "defaults",
+    env: params.env ?? process.env,
   });
-  const normalizedConfig = normalizePluginsConfig(activationConfig?.plugins);
   return {
     ...persisted,
     policyHash: resolveInstalledPluginIndexPolicyHash(params.config, params.env),
     generatedAtMs: (params.now?.() ?? new Date()).getTime(),
     refreshReason: params.reason,
-    plugins: persisted.plugins.map((plugin) => ({
-      ...plugin,
-      enabled: resolveEffectiveEnableState({
-        id: plugin.pluginId,
-        origin: plugin.origin,
-        channelIds: plugin.contributions?.channels,
-        config: normalizedConfig,
-        rootConfig: activationConfig,
-        enabledByDefault: isPluginEnabledByDefaultForPlatform(plugin),
-      }).enabled,
-    })),
+    plugins,
   };
 }
 

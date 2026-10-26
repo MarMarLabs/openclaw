@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
+import { throwCollectedErrors } from "../infra/error-graph-internal.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import type { OpenClawStateWorkerLeaseContext } from "../state/openclaw-state-lease-context.js";
@@ -31,13 +32,10 @@ export type PluginMetadataLeaseContext = {
   assertOwned(): void | Promise<void>;
 };
 
-export type PluginLifecycleLeaseContext = Omit<OpenClawStateLeaseContext, "assertOwned"> & {
-  assertOwned: () => void;
+export type PluginLifecycleLeaseContext = OpenClawStateLeaseContext & {
   databasePath: string;
   /** Original state owner; wrapper identity cannot authorize worker writes. */
   stateLease: OpenClawStateLeaseContext;
-  /** Live requester checks without synchronous lease SQL inside worker admission. */
-  assertCurrent(): void;
 };
 
 type PluginLifecycleRefusal = { current?: { error: unknown } };
@@ -51,7 +49,7 @@ function createPluginLifecycleLeaseContext(
   return {
     databasePath,
     stateLease: lease,
-    assertCurrent: () => assertAuthority(() => lease.signal.throwIfAborted()),
+    assertCurrent: () => assertAuthority(() => lease.assertCurrent()),
     signal: lease.signal,
     ...(lease.renew ? { renew: () => lease.renew?.() } : {}),
     assertOwned: () => lease.assertOwned(),
@@ -136,12 +134,7 @@ async function withPluginLifecycleCache<T>(run: () => Promise<T>): Promise<T> {
       failures.push(error);
     }
   }
-  if (failures.length === 1) {
-    throw failures[0];
-  }
-  if (failures.length > 1) {
-    throw new AggregateError(failures, "Plugin lifecycle work failed");
-  }
+  throwCollectedErrors(failures, "Plugin lifecycle work failed");
   return result;
 }
 
@@ -396,7 +389,7 @@ export async function withPluginLifecycleLeaseAsync<T>(
           assertCurrent();
         }),
     };
-    await owned.assertOwned();
+    owned.assertCurrent();
     return activePluginLifecycleLease.run(
       { kind: "worker", databasePath: owned.databasePath, lease: owned, refusal },
       () => run(owned),
@@ -412,6 +405,8 @@ export async function withPluginLifecycleLeaseAsync<T>(
         { code: "OPENCLAW_STATE_LEASE_INVALID_INPUT" },
       );
     }
+    // Retained async resources can still carry a completed lifecycle scope.
+    await active.lease.assertOwned();
     return runWithLease(active.lease);
   }
   const context = captureOpenClawStateWorkerContext({ env, path: databasePath });

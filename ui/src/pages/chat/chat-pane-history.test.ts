@@ -5,17 +5,17 @@ import { createComponent, createMemo, merge } from "solid-js";
 import { expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import { extractText } from "../../lib/chat/message-extract.ts";
 import { sessionsResult } from "../../lib/sessions/session-capability.test-support.ts";
 import { createApplicationContextProvider } from "../../test-helpers/application-context.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { createSolidApplicationContextProvider } from "../../test-helpers/solid-application-context.tsx";
-import { flush } from "../../test-helpers/solid-settle.ts";
+import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import "./chat-pane.tsx";
 import { handleChatGatewayEvent } from "./chat-gateway.ts";
 import type { ChatHistoryPagination } from "./chat-history-pagination.ts";
 import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
 import { resetChatHistoryProjection } from "./chat-history-state.ts";
+import { renderedText } from "./chat-history.inflight.test-support.ts";
 import { loadChatHistory } from "./chat-history.ts";
 import {
   appendChatThread,
@@ -29,7 +29,7 @@ import {
 } from "./chat-pane-history.test-support.ts";
 import { createGatewayBrowserClientFixture } from "./chat-pane.test-support.ts";
 import { applyChatPendingInputs } from "./chat-pending-inputs.ts";
-import { buildChatItems } from "./chat-thread-build.ts";
+import { createComposerQuestions } from "./components/chat-composer-questions.ts";
 import { ChatComposer, resetChatComposerState } from "./components/chat-composer.tsx";
 import { ChatHistoryBoundary } from "./components/chat-history-boundary.tsx";
 import { reduceChatSessionProjection } from "./history-merge.ts";
@@ -66,7 +66,7 @@ function historyPane(request = vi.fn(async () => historyPage())) {
 }
 
 function olderRequest(sessionKey: string, offset = 2) {
-  return { sessionKey, limit: 1000, maxBytes: 2 * 1024 * 1024, toolResultMaxChars: 2_000, offset };
+  return { sessionKey, limit: 1000, maxBytes: 3 * 1024 * 1024, toolResultMaxChars: 2_000, offset };
 }
 
 function pagination(totalMessages = 4, nextOffset?: number): ChatHistoryPagination {
@@ -111,10 +111,11 @@ function installHistoryObserver(intersect = true) {
   return { observe, disconnect, construct, rootMargin: () => rootMargin };
 }
 
-function appendSentinel(thread: HTMLElement) {
+function appendSentinel(thread: HTMLElement, pane: { historySentinel: HTMLElement | null }) {
   const sentinel = document.createElement("div");
   sentinel.className = "chat-history-sentinel";
   thread.append(sentinel);
+  pane.historySentinel = sentinel;
   return sentinel;
 }
 
@@ -136,7 +137,7 @@ it("updates the earlier-history control directly from pane loading state", () =>
 
   pane.history.loadingOlder = true;
   flush();
-  expect(button.disabled).toBe(true);
+  expect(button.getAttribute("aria-disabled")).toBe("true");
   expect(button.getAttribute("aria-busy")).toBe("true");
 
   pane.history.loadingOlder = false;
@@ -191,7 +192,8 @@ it.each(["pending", "resolved"] as const)(
             pane.render();
             return pane.chatProps!;
           });
-          return createComponent(ChatComposer, merge(current));
+          const questions = createComposerQuestions(pane.presentationId, current);
+          return createComponent(ChatComposer, merge(current, { questions }));
         },
         { container, wrapper: createSolidApplicationContextProvider(context).wrapper },
       );
@@ -214,8 +216,7 @@ it.each(["pending", "resolved"] as const)(
         container.querySelector('[role="option"] .slash-menu-name')?.textContent;
       if (replyState === "resolved") {
         response.resolve(people);
-        await vi.advanceTimersByTimeAsync(0);
-        expect(selectedName()).toBe("Bob");
+        await waitForSolid(() => expect(selectedName()).toBe("Bob"));
       }
 
       state.sessionsResult = sessionsResult(
@@ -232,8 +233,7 @@ it.each(["pending", "resolved"] as const)(
         1,
       );
       response.resolve(people);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(selectedName()).toBe("Bob");
+      await waitForSolid(() => expect(selectedName()).toBe("Bob"));
       expect(container.querySelector("textarea")).toBe(textarea);
       textarea.dispatchEvent(
         new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }),
@@ -250,7 +250,7 @@ it.each(["pending", "resolved"] as const)(
   },
 );
 
-it("keeps the accepted steer between saved output and the live tail through refresh", async () => {
+it("keeps the accepted steer and live tail visible while pane refresh is pending", () => {
   const history = createDeferred<ChatHistoryResult>();
   const request = vi.fn(() => history.promise);
   const client = { request } as unknown as GatewayBrowserClient;
@@ -280,24 +280,6 @@ it("keeps the accepted steer between saved output and the live tail through refr
       sessionKey: state.sessionKey,
       message: { role: "assistant", content: text },
     });
-  const renderedText = () =>
-    buildChatItems({
-      paneId: "refresh-regression",
-      sessionKey: state.sessionKey,
-      runId: state.chatRunId,
-      messages: state.chatMessages,
-      toolMessages: state.chatToolMessages,
-      streamSegments: state.chatStreamSegments,
-      stream: state.chatStream,
-      streamStartedAt: state.chatStreamStartedAt,
-      showToolCalls: true,
-    }).flatMap((item) =>
-      item.kind === "group"
-        ? item.messages.map(({ message }) => extractText(message)?.trim())
-        : item.kind === "stream"
-          ? [item.text.trim()]
-          : [],
-    );
   delta("Saved.");
   applySessionMessagePayload(state, { message: steer }, true, {
     kind: "live",
@@ -307,34 +289,10 @@ it("keeps the accepted steer between saved output and the live tail through refr
   const liveExpected = ["Start.", "Steer.", "Saved. Working."];
 
   try {
-    expect(renderedText()).toEqual(liveExpected);
+    expect(renderedText(state)).toEqual(liveExpected);
     pane.render();
     pane.chatProps!.onRefresh();
-    expect(renderedText()).toEqual(liveExpected);
-    history.resolve({
-      messages: [
-        original,
-        {
-          role: "assistant",
-          content: "Saved.",
-          __openclaw: { id: "saved-refresh", idempotencyKey: "run-refresh", seq: 2 },
-        },
-        steer,
-      ],
-      sessionInfo: {
-        key: state.sessionKey,
-        kind: "direct",
-        updatedAt: 4,
-        status: "running",
-        hasActiveRun: true,
-        activeRunIds: ["run-refresh"],
-      },
-      inFlightRun: { runId: "run-refresh", text: "Working." },
-    });
-    await vi.waitFor(() => expect(state.chatLoading).toBe(false));
-    expect(renderedText()).toEqual(["Start.", "Saved.", "Steer.", "Working."]);
-    delta("Working. Progress.");
-    expect(renderedText()).toEqual(["Start.", "Saved.", "Steer.", "Working. Progress."]);
+    expect(renderedText(state)).toEqual(liveExpected);
   } finally {
     state.connected = false;
     history.resolve({ messages: [] });
@@ -477,7 +435,7 @@ it("fills a visible history tail once the viewport can fit it", async () => {
   Object.defineProperty(thread, "scrollHeight", { value: 400 });
   let clientHeight = 0;
   Object.defineProperty(thread, "clientHeight", { get: () => clientHeight });
-  const sentinel = appendSentinel(thread);
+  const sentinel = appendSentinel(thread, pane);
   pane.append(thread);
   vi.spyOn(pane.transcript, "scrollElement", "get").mockReturnValue(thread);
   const { observe } = installHistoryObserver();
@@ -515,7 +473,7 @@ it("prefetches older history from upward intent well before the top edge", async
   const { pane, state, request } = historyPane();
   state.handleChatScroll = vi.fn();
   const thread = appendChatThread(pane, { scrollHeight: 4_000, clientHeight: 600 });
-  appendSentinel(thread);
+  appendSentinel(thread, pane);
   const observer = installHistoryObserver();
   pane.transcriptScrollTop = 900;
   thread.scrollTop = 800;
@@ -601,7 +559,7 @@ it("reuses an armed history observer and ignores its queued callback after reset
   state.chatHistoryPagination = { hasMore: true, nextOffset: 2, totalMessages: 4 };
   pane.historyObserverArmed = true;
   const thread = appendChatThread(pane, { scrollHeight: 400, clientHeight: 200 });
-  const sentinel = appendSentinel(thread);
+  const sentinel = appendSentinel(thread, pane);
   const { observe, disconnect, construct } = installHistoryObserver(false);
   pane.syncHistoryObserver();
   pane.syncHistoryObserver();

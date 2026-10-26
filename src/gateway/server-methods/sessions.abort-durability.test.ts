@@ -15,7 +15,9 @@ import {
   replaceSessionEntry,
 } from "../../config/sessions/session-accessor.js";
 import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
+import { readGatewayLockProcessNamespace } from "../../infra/gateway-lock-payload.js";
 import { acquireGatewayStateOwner } from "../../infra/gateway-state-owner.js";
+import { heartbeatNotifications } from "../../infra/heartbeat-events.js";
 import { createReplyOperation } from "../../sessions/session-controller.operation.js";
 import { captureSessionTarget } from "../../sessions/session-controller.target.js";
 import {
@@ -30,7 +32,7 @@ import { startGatewayEventSubscriptions } from "../server-runtime-subscriptions.
 import { createSubscriptionTestFixture } from "../server-runtime-subscriptions.test-support.js";
 import * as lifecycleState from "../session-lifecycle-state.js";
 import { claimRpcSourceForTest } from "../test-helpers.rpc-source.js";
-import { sessionAbortHandlers } from "./sessions-abort.js";
+import { stopSession } from "./sessions.abort-lifecycle.test-support.js";
 import type { RespondFn } from "./types.js";
 
 const log = createMockSubsystemLogger("sessions-abort-durability-test");
@@ -52,6 +54,7 @@ it.each([
         databasePath: resolveOpenClawStateSqlitePath(state.env),
         payload: {
           pid: process.pid,
+          processNamespace: readGatewayLockProcessNamespace(),
           createdAt: new Date().toISOString(),
           configPath: state.configPath,
           stateDir: state.stateDir,
@@ -70,6 +73,7 @@ it.each([
       };
       const sessionId = "abort-durability-session";
       const runId = "abort-durability-run";
+      const identity = { sessionKey: target.sessionKey, sessionId, agentId: target.agentId };
       const context = createDirectChatContext({ getRuntimeConfig: () => cfg });
       const aborted = createDeferred();
       const embeddedState = {
@@ -90,9 +94,7 @@ it.each([
       const registration = mode.startsWith("controller")
         ? registerChatAbortController({
             target: controllerTarget,
-            sessionKey: target.sessionKey,
-            sessionId,
-            agentId: target.agentId,
+            ...identity,
             runId,
             kind: "agent",
             timeoutMs: 60_000,
@@ -118,9 +120,7 @@ it.each([
         ? registration?.entry?.input.claim?.operation
         : createReplyOperation({
             target: controllerTarget,
-            sessionKey: target.sessionKey,
-            sessionId,
-            agentId: target.agentId,
+            ...identity,
             resetTriggered: false,
           });
       if (mode !== "controller") {
@@ -201,17 +201,13 @@ it.each([
             });
         }
         request = Promise.resolve(
-          sessionAbortHandlers["sessions.abort"]!({
-            req: { type: "req", id: "abort-durability", method: "sessions.abort" },
-            params: {
-              key: target.sessionKey,
-              ...(mode.endsWith("session") ? {} : { runId }),
-            },
+          stopSession(
+            target.sessionKey,
             respond,
             context,
-            client: null,
-            isWebchatConnect: () => false,
-          }),
+            mode.endsWith("session") ? {} : { runId },
+            null,
+          ),
         );
         void request.catch(() => {});
         await aborted.promise;
@@ -258,7 +254,7 @@ it.each([
         releaseController?.();
         registration?.cleanup();
         await subscriptions.agentUnsub();
-        subscriptions.heartbeatUnsub();
+        heartbeatNotifications.onEvent = () => {};
         subscriptions.transcriptUnsub();
         subscriptions.lifecycleUnsub();
         persistenceSpy?.mockRestore();

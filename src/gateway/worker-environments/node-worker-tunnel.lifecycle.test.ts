@@ -40,7 +40,7 @@ import {
   transport,
   withWorkspaceDrain,
   workspaceTransfer,
-  workspaceCommandPayload,
+  workspaceReply,
   tunnelLaunchPlan as plan,
 } from "./node-worker-tunnel.test-support.js";
 import { sameWorkerSessionTurnClaim } from "./placement-record.js";
@@ -82,10 +82,7 @@ async function expectPending(promise: Promise<unknown>) {
   expect(settled).not.toHaveBeenCalled();
 }
 const nullReply = { ok: true, payloadJSON: "null" };
-const drainReply = () => ({
-  ok: true,
-  payloadJSON: workspaceCommandPayload("/node/workspace", { stdout: "drained\n" }),
-});
+const drainReply = () => workspaceReply("/node/workspace", { stdout: "drained\n" });
 
 function receiptIdentity(input: NodeWorkerLaunchInput, planHash = "b".repeat(64)) {
   return {
@@ -277,6 +274,119 @@ describe("node worker tunnel lifetime", () => {
     } finally {
       release.resolve();
       await retry;
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds already-cancelling active turns at shutdown while retaining transfer settlement", async () => {
+    const records = [
+      record,
+      { ...record, environmentId: "environment-2", attachedSessionIds: ["session-2"] },
+    ];
+    const statusesEntered = createDeferred();
+    const cancellationsEntered = createDeferred();
+    const remoteRelease = createDeferred();
+    const transferRelease = createDeferred();
+    const host = await currentNodeHost();
+    host.capturedExecPolicy = true;
+    host.promptContext = 1;
+    let statusCount = 0;
+    let cancellationCount = 0;
+    nodeTransport.invoke = withWorkspaceDrain(async (request) => {
+      if (request.command === LAUNCH) {
+        const input = request.params as NodeWorkerLaunchInput;
+        request.onDispatchReady?.("launch-invoke");
+        return supervisorReply({
+          ...receiptIdentity(input, nodeWorkerPlanHash(input)),
+          state: "running",
+        });
+      }
+      if (request.command === READ_STATUS && ++statusCount === records.length) {
+        statusesEntered.resolve();
+      }
+      if (request.command === CANCEL_LAUNCH && ++cancellationCount === records.length) {
+        cancellationsEntered.resolve();
+      }
+      // The remote owner never acknowledges cancellation or environment stop.
+      await remoteRelease.promise;
+      return nullReply;
+    });
+    transfer.close = vi.fn(async () => await transferRelease.promise);
+    const closeAll = vi.fn(async () => {});
+    transfer.closeAll = closeAll;
+    const adapter = createNodeWorkerLaunchAdapter({
+      getTransport: () => nodeTransport,
+      sleep: async () => {},
+    });
+    const manager = createManager({
+      getEnvironment: (id) => records.find((entry) => entry.environmentId === id),
+      listEnvironments: () => records,
+      launchNodeWorker: adapter.launch,
+    });
+    const controllers = records.map(() => new AbortController());
+    const launchSettled = vi.fn();
+    const launches: Promise<unknown>[] = [];
+    let stopping: Promise<unknown> | undefined;
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    try {
+      for (const [index, currentEnvironment] of records.entries()) {
+        const sessionId = currentEnvironment.attachedSessionIds[0]!;
+        const handle = await manager.start({
+          ...startRequest(),
+          environmentId: currentEnvironment.environmentId,
+          sessionId,
+        });
+        const launchPlan = plan();
+        launchPlan.admission.environmentId = currentEnvironment.environmentId;
+        launchPlan.admission.sessionId = sessionId;
+        launchPlan.assignment.turnId = `turn-${index + 1}`;
+        launchPlan.assignment.runId = `run-${index + 1}`;
+        launches.push(
+          handle
+            .launchTurn({
+              plan: launchPlan,
+              turnClaim: {
+                ...turnClaim(),
+                sessionId,
+                runId: launchPlan.assignment.runId,
+                owner: {
+                  kind: "worker",
+                  environmentId: currentEnvironment.environmentId,
+                  ownerEpoch: currentEnvironment.ownerEpoch,
+                },
+              },
+              signal: controllers[index]!.signal,
+            })
+            .then(launchSettled, (error: unknown) => {
+              launchSettled();
+              return error;
+            }),
+        );
+      }
+      await statusesEntered.promise;
+      for (const controller of controllers) {
+        controller.abort(new Error("active turn cancelled before restart"));
+      }
+      await cancellationsEntered.promise;
+      manager.beginClose();
+      const stopSettled = vi.fn();
+      stopping = manager.stopAll().then(stopSettled, (error: unknown) => {
+        stopSettled();
+        return error;
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(launchSettled).toHaveBeenCalledTimes(2);
+      expect(transfer.close).toHaveBeenCalledTimes(2);
+      expect(stopSettled).not.toHaveBeenCalled();
+      expect(closeAll).not.toHaveBeenCalled();
+      transferRelease.resolve();
+      expect(await stopping).toBeInstanceOf(WorkerTunnelOwnerDisconnectedError);
+      expect(closeAll).toHaveBeenCalledOnce();
+    } finally {
+      transferRelease.resolve();
+      await vi.advanceTimersByTimeAsync(30_000);
+      remoteRelease.resolve();
+      await Promise.allSettled([...launches, ...(stopping ? [stopping] : [])]);
       vi.useRealTimers();
     }
   });

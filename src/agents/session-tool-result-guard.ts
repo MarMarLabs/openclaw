@@ -168,7 +168,6 @@ export function installSessionToolResultGuard(
   flushPendingToolResults: () => void;
   flushPendingToolResultsAsync: () => Promise<void>;
   clearPendingToolResults: () => void;
-  setNextUserMessagePersistence: (mode: NextUserMessagePersistence) => void;
   getPendingIds: () => string[];
 } {
   const originalAppend = getRawSessionAppendMessage(sessionManager);
@@ -348,6 +347,7 @@ export function installSessionToolResultGuard(
     // Destructive tool-side state commits only after this exact result is durable.
     acknowledgeInternalToolResult(acknowledgementSource);
     if (assistantSource && appended) {
+      assistantSource.committedMessageId = entryId;
       assistantSource.committedMessageSeq =
         messageSeq ?? (anchor ? anchor.activeMessagePosition + 1 : null);
       bindAgentAssistantSource(persistedMessage, assistantSource);
@@ -631,9 +631,6 @@ export function installSessionToolResultGuard(
     flushPendingToolResults,
     flushPendingToolResultsAsync,
     clearPendingToolResults: () => pending.clear(),
-    setNextUserMessagePersistence: (mode) => {
-      captureMessageContext().nextUserMessagePersistence = mode;
-    },
     getPendingIds: () => Array.from(pending.keys()),
   };
 }

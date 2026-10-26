@@ -42,7 +42,7 @@ export function placementStoreDefaults(read: () => readonly Placement[] = () => 
 
 export function createEnvironments() {
   return {
-    subscribeMachineShapeChanged: vi.fn(() => vi.fn()),
+    machineShapeNotifications: { onChanged: (_profileId: string) => {} },
     installReconcileEnvironmentGuard: vi.fn(() => vi.fn()),
     start: vi.fn(),
     isStopping: () => false,
@@ -69,6 +69,7 @@ export function setDispatchMock(
     dispatch: vi.fn(),
     forceDestroyEnvironment: vi.fn(),
     reclaim: vi.fn(),
+    subscribeOrphanWorkspaceChanges: () => () => {},
     reconcile: vi.fn().mockResolvedValue(undefined),
     reconcileActive: vi.fn().mockResolvedValue(undefined),
     ...overrides,

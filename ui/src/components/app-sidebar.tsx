@@ -1,23 +1,17 @@
+import "../styles/sidebar-attention-floating.css";
+import "../styles/session-title-placeholder.css";
 import { getObserver } from "@solidjs/signals";
-import { insert, type JSX } from "@solidjs/web";
-import {
-  createEffect,
-  createMemo,
-  createRoot,
-  getOwner,
-  onCleanup,
-  onSettled,
-  runWithOwner,
-  Show,
-} from "solid-js";
+import type { JSX } from "@solidjs/web";
+import { createEffect, createMemo, onCleanup, onSettled } from "solid-js";
 import { rosterActivityStore } from "../lib/agents/roster-activity-store.ts";
 import { useApplication, useOptionalApplication } from "../lib/reactive/context.ts";
+import { i18nRevision } from "../lib/reactive/i18n.ts";
 import { listen } from "../lib/reactive/listener.ts";
 import { createParkedProjection } from "../lib/reactive/parked-projection.ts";
 import { projectOwner, projectSource } from "../lib/reactive/projection.ts";
 import { createTimeout } from "../lib/reactive/timers.ts";
 import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
-import { PluginView } from "../plugins/control-ui-view.solid.tsx";
+import { PluginSurface } from "../plugins/control-ui-view.solid.tsx";
 import { appSidebarProperties, type AppSidebarProps } from "./app-sidebar-base.ts";
 import { AppSidebarOwner } from "./app-sidebar-owner.tsx";
 import { createSessionPullRequestIndicators } from "./app-sidebar-session-pr-indicators.ts";
@@ -92,7 +86,6 @@ function AppSidebarContent(
   const projection = projectSource(owner, {
     read: (current) => current,
     subscribe: (current, notify) => {
-      current.catalogRendererImport.schedule();
       const stops = [
         current.subscribe(notify),
         context.chatSubmissions.subscribeCreate(notify),
@@ -175,7 +168,11 @@ function AppSidebarContent(
   });
   const narrationState = createParkedProjection(
     () => narrationProjection()?.read(),
-    () => props.navigationVisible,
+    () => {
+      projection.revision();
+      // Preserve live narration for reactivation without preparing hidden previews.
+      return props.navigationVisible && owner.sessionsShowPreview;
+    },
   );
   onSettled(() => context.gateway.subscribeEvents((event) => owner.narration?.handleEvent(event)));
   const presentationRevision = createParkedProjection(
@@ -190,13 +187,46 @@ function AppSidebarContent(
       return projection.revision();
     },
     () => props.navigationVisible,
-    // Shell inputs finish preparing a hidden first mount; owner traffic stays parked.
-    () => Object.values(props),
+    // Connection and selection prepare a hidden view; cosmetic shell writes keep it parked.
+    () => [
+      props.connected,
+      props.router,
+      props.activeRouteId,
+      props.sessionKey,
+      props.navigationView,
+      props.sidebarAgentsMode,
+    ],
   );
   const observed = new WeakMap<object, object>();
+  const mutationInputs = createMemo(
+    () => {
+      presentationRevision();
+      const gateway = context.gateway.snapshot;
+      return [
+        owner.connected,
+        Boolean(owner.sidebarSnapshot),
+        gateway.phase,
+        gateway.client,
+        gateway.client?.offlineRecoveryRetired,
+        JSON.stringify([gateway.hello?.auth, gateway.hello?.features?.methods]),
+      ];
+    },
+    { equals: (previous, next) => previous.every((value, index) => value === next[index]) },
+  );
+  const readSessionMutationAccess: AppSidebarOwner["readSessionMutationAccess"] = (request) => {
+    if (getObserver()) {
+      mutationInputs();
+      i18nRevision();
+    }
+    // Only presentation dependencies are narrowed; actions still read the synchronous owner.
+    return owner.readSessionMutationAccess(request);
+  };
   const observe = <T extends object>(target: T): T => {
     const proxy = new Proxy(target, {
       get(current, key, receiver) {
+        if (current === owner && key === "readSessionMutationAccess") {
+          return readSessionMutationAccess;
+        }
         if (getObserver()) {
           presentationRevision();
         }
@@ -220,34 +250,18 @@ function AppSidebarContent(
     getGateway: () => prepared().sessionDataContext?.gateway,
     getSessions: () => prepared().sessionDataContext?.sessions,
   });
-  const solidOwner = getOwner();
-  const mountDefaultView = (target: HTMLElement) =>
-    runWithOwner(solidOwner, () =>
-      createRoot((dispose) => {
-        insert(target, hostView.renderSessionsBody());
-        return () => {
-          dispose();
-          target.replaceChildren();
-        };
-      }),
-    );
   const SessionBody = () => hostView.renderSessionsBody();
   const Sessions = () => (
-    <Show
-      when={Boolean(hostView.sessionDataContext?.plugins.selectedReplacement("session-list"))}
-      fallback={<SessionBody />}
-    >
-      <PluginView
-        surface="session-list"
-        props={{
-          sessionKey: hostView.sessionKey,
-          agentId: hostView.getSessionNavigationState().selectedAgentId,
-          sessions: hostView.sessionDataContext?.sessions.state.result?.sessions ?? [],
-        }}
-        presented={hostView.navigationVisible}
-        mountDefaultView={mountDefaultView}
-      />
-    </Show>
+    <PluginSurface
+      surface="session-list"
+      props={{
+        sessionKey: hostView.sessionKey,
+        agentId: hostView.getSessionNavigationState().selectedAgentId,
+        sessions: hostView.sessionDataContext?.sessions.state.result?.sessions ?? [],
+      }}
+      presented={hostView.navigationVisible}
+      renderDefault={() => <SessionBody />}
+    />
   );
   const content = hostView.renderSidebar(Sessions, scroll, {
     pending: snapshotPending,
@@ -293,18 +307,19 @@ function AppSidebarContent(
       owner.sessionData.connect();
     }
     let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => owner.classList.add("sidebar-r"));
+      frame = requestAnimationFrame(() => host.classList.add("sidebar-r"));
     });
     return () => {
       cancelAnimationFrame(frame);
       owner.sessionData.disconnect(owner.isConnected);
+      disconnectSidebarOwner(host);
     };
   });
-  onCleanup(() => disconnectSidebarOwner(host));
   return content;
 }
 
 export type AppSidebarMethods = {
+  activeNavigationViewElement(): HTMLElement | undefined;
   dismissTransientMenus(): boolean;
   expandedAgentId(): string;
   findSidebarHovercardRowByKey(
@@ -322,6 +337,7 @@ export const AppSidebar = defineSolidBridge<AppSidebarProps, AppSidebarMethods>(
     connected: (host) => sidebarOwners.get(host)?.attach(),
     disconnected: (host) => sidebarOwners.get(host)?.detach(),
     methods: {
+      activeNavigationViewElement: (host) => sidebarOwners.get(host)?.activeNavigationViewElement(),
       dismissTransientMenus: dismissSidebarTransientMenus,
       expandedAgentId: (host) => sidebarOwners.get(host)?.expandedAgentId() ?? "",
       findSidebarHovercardRowByKey: (host, key) =>
