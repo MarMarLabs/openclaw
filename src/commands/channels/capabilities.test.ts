@@ -196,7 +196,7 @@ describe("channelsCapabilitiesCommand", () => {
     ["blank agent with all", { channel: "all", agent: " " }, "--agent must not be blank", 0],
     // --account is absent from this table because parseAccountSelector rejects it at
     // option-parse time, and src/cli/account-selector-boundary.test.ts already proves
-    // that for this route, blank and whitespace, before command startup.
+    // the blank case (`--account ""`) for this route, before command startup.
     ["blank target without channel", { target: "  " }, targetBlank, 0],
     ["blank target with channel", { channel: "discord", target: "", json: true }, targetBlank, 0],
     [
