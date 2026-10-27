@@ -51,7 +51,6 @@ extensions/feishu/src/channel.ts
 extensions/feishu/src/doctor.ts
 extensions/feishu/src/docx.ts
 extensions/feishu/src/monitor.comment.ts
-extensions/feishu/src/outbound.test.ts
 extensions/feishu/src/reply-dispatcher.test.ts
 extensions/feishu/src/reply-dispatcher.ts
 extensions/google-meet/index.test.ts
@@ -66,7 +65,6 @@ extensions/imessage/src/send.ts
 extensions/lmstudio/src/setup.ts
 extensions/matrix/src/matrix/monitor/handler.test.ts
 extensions/matrix/src/matrix/sdk.test.ts
-extensions/matrix/src/matrix/send.test.ts
 extensions/mattermost/src/channel.ts
 extensions/memory-core/doctor-contract-api.test.ts
 extensions/memory-core/src/cli.test.ts
@@ -144,7 +142,6 @@ extensions/zalouser/src/monitor.ts
 extensions/zalouser/src/zalo-js.ts
 packages/agent-core/src/agent-loop.test.ts
 packages/agent-core/src/agent-loop.ts
-packages/ai/src/providers/anthropic.test.ts
 packages/ai/src/providers/openai-chatgpt-responses.ts
 packages/ai/src/providers/openai-responses-shared.test.ts
 packages/ai/src/transports/anthropic-transport-stream.test.ts
@@ -319,7 +316,6 @@ src/gateway/server.chat.gateway-server-chat-b.test.ts
 src/gateway/server.config-patch.test.ts
 src/gateway/server/ws-connection/message-handler.post-connect-health.test.ts
 src/gateway/session-create-service.ts
-src/gateway/session-message-events.test.ts
 src/gateway/session-reset-service.ts
 src/gateway/session-utils.test.ts
 src/gateway/sessions-patch.test.ts

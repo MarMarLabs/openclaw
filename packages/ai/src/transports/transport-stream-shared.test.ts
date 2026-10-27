@@ -6,6 +6,7 @@ import { createOpenAIResponsesAssistantOutput } from "./openai-responses-replay-
 import {
   assignTransportErrorDetails,
   iterateModelStream,
+  iterateSseFrames,
   notifyProviderHttpMetadata,
   notifyProviderHttpResponse,
   parseTerminalToolCallArguments as parseArguments,
@@ -347,7 +348,15 @@ describe("model stream cooperative scheduler", { concurrent: false }, () => {
     const stream = iterateModelStream(["first", "second", "third"]);
     await expect(stream.next()).resolves.toEqual({ done: false, value: "first" });
     now = 6;
+    // Chaining a native promise consults species; awaiting the shared promise does not.
+    const species = vi.spyOn(Promise, Symbol.species, "get");
     const second = stream.next();
+    // Let the upstream read reach admission without advancing the shared timer.
+    await Promise.resolve();
+    await Promise.resolve();
+    const chainedWaits = species.mock.calls.length;
+    species.mockRestore();
+    expect(chainedWaits).toBe(0);
     let delivered = false;
     void second.then(() => {
       delivered = true;
@@ -383,6 +392,52 @@ describe("model stream cooperative scheduler", { concurrent: false }, () => {
         await vi.runOnlyPendingTimersAsync();
       }
       await rejected;
+    },
+  );
+});
+
+describe("SSE pending limits", () => {
+  it.each(["characters", "bytes"] as const)(
+    "counts %s across UTF-8 and delimiter splits",
+    async (unit) => {
+      const frame = "data: 😀x\nignored";
+      const max = unit === "characters" ? frame.length : Buffer.byteLength(frame);
+      for (const ending of ["", "\n\n"]) {
+        for (const allowed of [max - 1, max, max + 4]) {
+          for (const chunkSize of [1, Buffer.byteLength("data: 😀x\n")]) {
+            if (allowed === max && ending && chunkSize !== 1) {
+              continue;
+            }
+            const bytes = new TextEncoder().encode(frame + ending);
+            let offset = 0;
+            const read = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+              if (offset === bytes.length) {
+                return { done: true, value: undefined };
+              }
+              const start = offset;
+              offset = Math.min(bytes.length, offset + chunkSize);
+              return { done: false, value: bytes.subarray(start, offset) };
+            };
+            const frames = (async () => {
+              const result = [];
+              for await (const event of iterateSseFrames(read, {
+                max: allowed,
+                unit,
+                message: "fixture limit",
+              })) {
+                result.push(event);
+              }
+              return result;
+            })();
+            // An incomplete delimiter counts toward the pending limit, as before.
+            if (allowed < max || (allowed === max && ending)) {
+              await expect(frames).rejects.toThrow("fixture limit");
+            } else {
+              await expect(frames).resolves.toEqual([{ frame, terminated: Boolean(ending) }]);
+            }
+          }
+        }
+      }
     },
   );
 });
