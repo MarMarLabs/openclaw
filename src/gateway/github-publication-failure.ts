@@ -66,9 +66,30 @@ export class GitHubPublicationBranchChangedError extends GitHubPublicationKnownF
       code: "push_rejected",
       nextAction: options.originalPullRequest
         ? "Preserve your local work and inspect the original PR's current head. Continue only after its updated source has been explicitly accepted and your intended edits reapplied without rewriting published history. Do not create a replacement PR or redirect publication to another branch."
-        : "Preserve your local work and inspect the published head. To refresh the existing PR, apply the intended changes on top of that head without rewriting its history; otherwise publish from a new session branch and open a replacement PR. Repository-only checkpoints cannot adopt external branch changes; use a new session branch for those. Do not merge old history merely to make a rebased branch pushable. The broker never rewrites published history.",
+        : "Preserve your local work and inspect the published head. If this conversation published the PR from its managed workspace, call prepare_pr with its URL to merge the newer head into the saved work, then publish again; otherwise publish from a new session branch and open a replacement PR. Repository-only checkpoints cannot adopt external branch changes; use a new session branch for those. Do not merge old history merely to make a rebased branch pushable. The broker never rewrites published history.",
     });
   }
+}
+
+/**
+ * Classify a push whose head did not land. Git exiting on its own with a failure while the
+ * remote still holds its pre-push head is a definitive rejection. Anything else (exit 0, a
+ * killed or signalled push, or a moved remote) stays unconfirmed for recovery to settle.
+ */
+export function gitHubPublicationPushFailure(
+  pushed: { code: number | null; signal: unknown; killed: boolean },
+  remoteUnchanged: boolean,
+  { login, pushRepository }: { login: string; pushRepository: string },
+): Error {
+  if (!remoteUnchanged || pushed.code === 0 || pushed.signal !== null || pushed.killed) {
+    return new Error(
+      pushed.code === 0 ? "GitHub push verification failed." : "GitHub push was rejected.",
+    );
+  }
+  return new GitHubPublicationKnownFailure(`GitHub rejected the push to ${pushRepository}.`, {
+    code: "push_rejected",
+    nextAction: `GitHub rejected @${login}'s push to ${pushRepository}; nothing was pushed. Give @${login} write access (or point the worktree's origin at a fork it owns) and check the repository's branch rules, then request publication again.`,
+  });
 }
 
 export class GitHubPublicationSessionChangedError extends GitHubPublicationKnownFailure {

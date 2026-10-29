@@ -149,7 +149,6 @@ export async function runEmbeddedAgentAttempt(params: RunEmbeddedAgentAttemptPar
     attemptLifecycleState,
     () => {
       executionStarted = true;
-      return params.preparedRunAdmission.onRuntimeTurnStarted();
     },
   );
   const { suppressUserTurnPersistence, userTurnTranscriptRecorder } =
@@ -278,6 +277,7 @@ export async function runEmbeddedAgentAttempt(params: RunEmbeddedAgentAttemptPar
           requestedRouteResolution: params.modelSelection.requestedRouteResolution,
           agentDir,
           fallbacksOverride: effectiveFallbacksOverride,
+          cyberAccessProgram: sessionEntryForAttempt?.cyberAccessProgram,
           userLockedAuthProfileId:
             resolveSessionAuthProfileOverrideSource(sessionEntryForAttempt) === "user"
               ? sessionEntryForAttempt?.authProfileOverride

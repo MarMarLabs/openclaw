@@ -10,12 +10,16 @@ export async function startControlUiBenchGatewayServer(
   assetLatencyMs = 0,
 ) {
   let readFixture:
-    | ((pathname: string) =>
+    | ((
+        pathname: string,
+        url: URL,
+      ) =>
         | {
             body: string | Buffer;
             contentType: string;
             delayMs?: number;
             headers?: Record<string, string>;
+            status?: number;
           }
         | undefined)
     | undefined;
@@ -54,6 +58,7 @@ export async function startControlUiBenchGatewayServer(
   }
 
   let currentRoot = await prepareRoot(outDir);
+  let responseLatencyMs = assetLatencyMs;
   let preloadHeadersEnabled = true;
   let terminalEnabled = false;
   let closing: Promise<void> | undefined;
@@ -70,10 +75,11 @@ export async function startControlUiBenchGatewayServer(
       url: request.url ?? "/",
       navigationPreload: request.headers["service-worker-navigation-preload"] !== undefined,
     });
-    const fixture = readFixture?.(new URL(request.url ?? "/", "http://localhost").pathname);
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const fixture = readFixture?.(url.pathname, url);
     if (fixture) {
       const send = () => {
-        response.writeHead(200, {
+        response.writeHead(fixture.status ?? 200, {
           "Content-Type": fixture.contentType,
           "Cache-Control": "no-store",
           "Access-Control-Allow-Origin": "*",
@@ -112,9 +118,9 @@ export async function startControlUiBenchGatewayServer(
     );
   };
   const server = createServer((request, response) => {
-    if (assetLatencyMs > 0) {
+    if (responseLatencyMs > 0) {
       // Server-side delay also covers dedicated-worker module imports.
-      setTimeout(() => serve(request, response), assetLatencyMs);
+      setTimeout(() => serve(request, response), responseLatencyMs);
     } else {
       serve(request, response);
     }
@@ -139,6 +145,9 @@ export async function startControlUiBenchGatewayServer(
     },
     setTerminalEnabled(enabled: boolean) {
       terminalEnabled = enabled;
+    },
+    setAssetLatencyMs(latencyMs: number) {
+      responseLatencyMs = latencyMs;
     },
     setFixtureReader(reader: typeof readFixture) {
       readFixture = reader;

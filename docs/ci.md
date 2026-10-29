@@ -222,7 +222,9 @@ Current iOS Debug builds log CPU count, memory, machine model, booted simulators
 
 Shared OpenClawKit Periphery scans restore the same verified Watch RTC libraries published by trusted main CI, without saving caches. Both Apple consumers build their complete index in a separate timed step with streamed output retained as `build.log` in the consumer artifact. iOS uses a fresh run-owned index; Periphery analyzes that exact index without rebuilding. Scan scope and the shared dead-code intersection stay unchanged. Cache misses retain the locked Cargo build.
 
-iOS screenshot shards, release qualification, Store Release, and its screenshot-only operation use [larger hosted capacity](/ci/runners). Screenshot capture uses stock simulators and creates and cleans up one at a time; the screenshot-only operation can validate a selected branch without signing or uploading a release. The pairing, chat, and native Overview tests retain their existing assertions and deadlines.
+iOS screenshot capture, release qualification, Store Release, and its screenshot-only operation use [larger hosted capacity](/ci/runners). Screenshot capture uses stock simulators and creates and cleans up one at a time; the screenshot-only operation can validate a selected branch without signing or uploading a release. The pairing, chat, and native Overview tests retain their existing assertions and deadlines.
+
+iOS Store Release and daily TestFlight check out the exact selected commit at depth one, then fetch its complete ancestry without unrelated branches, tags, or historical file contents. Release-note reads fetch their recorded baseline refs and hydrate historical contents as needed. Source identity and main-ancestry checks remain unchanged.
 
 Release qualification disables Spotlight indexing on the disposable runner's Data volume before checkout. After Simulator boot, it requires ten seconds of at least 30% idle host CPU within five minutes before issuing the pairing credential. This keeps first-launch background work out of the Gateway and XCTest deadlines. Local qualification uses the same CPU readiness check and leaves host indexing settings to the operator.
 
@@ -230,6 +232,13 @@ Android screenshot-input PRs and ordinary full manual CI run the existing phone
 and Wear store capture script in one hosted Ubuntu job. The final CI gate requires
 capture to succeed; unit-test-only and documentation changes omit it. See
 [the job graph](/ci/pipeline#pipeline-overview) for capture evidence and scope details.
+
+Android Store Release and Internal distribution use the Blacksmith 32-class for
+their shared build/upload job. A controlled cold-build comparison measured eight
+usable CPUs on this class and reduced median signing preflight plus phone/Wear
+bundle time from 621 to 217 seconds. This trades paid compute for shorter release
+runs; qualification and ordinary screenshot CI retain hosted Ubuntu. See
+[runner evidence and cost](/ci/runners#android-release-runner).
 
 Android Release E2E adds one hosted Ubuntu KVM job to exact-source, full-scope
 manual validation when Android is selected, matching the iOS qualification
