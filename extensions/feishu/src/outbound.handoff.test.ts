@@ -1,4 +1,3 @@
-// Feishu tests cover send authority across every physical message one delivery fans out.
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
@@ -45,15 +44,12 @@ const completionRetention = {
   maxEntries: 10,
 } as const;
 
-// Three messages at the 4000-character cut, so the fanout has to survive the authority
-// question twice more after the one core asked around the whole adapter call.
 const LONG_REPLY = Array.from(
   { length: 300 },
   (_entry, index) => `Line ${index} of a long outbound reply.`,
 ).join("\n");
 const LONG_REPLY_MESSAGES = 3;
 
-/** The registered formatted entry: what core routes an uncut reply through. */
 function registeredFormattedSend() {
   const send = feishuPlugin.outbound?.sendFormattedText;
   if (!send) {
@@ -78,7 +74,6 @@ function registeredMediaSend() {
   return send;
 }
 
-/** A writer whose authority is revoked in place, the way a replaced turn revokes one. */
 function createSender() {
   let current = true;
   return {
@@ -94,11 +89,6 @@ function createSender() {
   };
 }
 
-/**
- * Retirement keyed on the first message the reader actually received, not on a count of
- * authority checks: a check core adds or drops elsewhere cannot then move where this
- * revocation lands.
- */
 function retireAfterFirstDelivery(sender: { retire: () => void }) {
   const delivered: string[] = [];
   return {
@@ -116,7 +106,6 @@ function errorCauses(error: unknown) {
   return collectErrorGraphCandidates(error, (current) => [current.cause]);
 }
 
-/** A refused message is permanently not dispatched, never a retryable send failure. */
 function expectNotDispatched(error: unknown) {
   expect(errorCauses(error)).toEqual(
     expect.arrayContaining([
@@ -128,7 +117,6 @@ function expectNotDispatched(error: unknown) {
   );
 }
 
-/** The rich-post text of one recorded message request, as the reader received it. */
 function postText(request: { body: string }): string {
   const envelope = JSON.parse(request.body) as { content?: string };
   const post = JSON.parse(envelope.content ?? "{}") as {
@@ -144,16 +132,10 @@ function messageTexts(requests: readonly { path: string; body: string }[]): stri
   return requests.filter((request) => request.path === MESSAGE_PATH).map(postText);
 }
 
-/**
- * Every transmitted message split back into authored lines, in send order. The rich-post
- * envelope carries a whole chunk in one element run, so the line breaks live inside the
- * text rather than in the element structure.
- */
 function messageLines(requests: readonly { path: string; body: string }[]): string[] {
   return messageTexts(requests).flatMap((text) => text.split("\n"));
 }
 
-/** The text of one recorded document-comment reply, as the thread received it. */
 function commentReplyText(request: { body: string }): string {
   const envelope = JSON.parse(request.body) as {
     content?: { elements?: { text_run?: { text?: string } }[] };
@@ -230,7 +212,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
     await withFeishuTransport(async (fixture) => {
       const sender = createSender();
       const delivered: string[] = [];
-      // Distinct ids per message, so a receipt that kept only one of them is visible.
       let accepted = 0;
       fixture.respond(async (request, response) => {
         if (request.path !== MESSAGE_PATH) {
@@ -254,7 +235,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
           delivered.push(progress.messageId ?? "");
         },
       } as never);
-
       const expectedIds = Array.from(
         { length: LONG_REPLY_MESSAGES },
         (_entry, index) => `om_accepted_${String(index + 1)}`,
@@ -264,9 +244,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
         ...Array.from({ length: LONG_REPLY_MESSAGES }, () => MESSAGE_PATH),
       ]);
       const texts = messageTexts(fixture.requests);
-      // Every authored line, once each and in order. Containment alone would pass a fanout
-      // that duplicated or reordered a chunk. Trailing hard-break markers belong to the
-      // formatter and are asserted elsewhere, so they are trimmed off here.
       expect(messageLines(fixture.requests).map((line) => line.trimEnd())).toEqual(
         LONG_REPLY.split("\n"),
       );
@@ -277,7 +254,7 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
     });
   });
 
-  it("stops the formatted fanout once its sender retires after the first message", async () => {
+  it("stops the formatted fanout once its sender retires, reporting the message received", async () => {
     await withFeishuTransport(async ({ cfg, requests }) => {
       const sender = createSender();
       const { onDeliveryResult, delivered } = retireAfterFirstDelivery(sender);
@@ -288,42 +265,16 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
         text: LONG_REPLY,
         onDeliveryResult,
       } as never).catch((cause: unknown) => cause);
-
       expectNotDispatched(outcome);
-      // One message, and nothing after it: no later chunk, upload, card or comment.
       expect(requests.map((request) => request.path)).toEqual([AUTH_PATH, MESSAGE_PATH]);
       expect(delivered).toEqual(["om_accepted"]);
-      // The refused message never reached the refresh, so it never claimed dispatch timing.
       expect(sender.onPlatformSendDispatch).toHaveBeenCalledOnce();
-    });
-  });
-
-  // Losing authority mid-fanout must not lose the receipts of the messages that already
-  // reached the reader: the turn would then record the whole answer as undelivered and a
-  // retry would repeat the text the reader is looking at.
-  it("reports the message the reader received when its sender retires mid-fanout", async () => {
-    await withFeishuTransport(async ({ cfg, requests }) => {
-      const sender = createSender();
-      const { onDeliveryResult } = retireAfterFirstDelivery(sender);
-      const outcome = await registeredFormattedSend()({
-        ...sender,
-        cfg,
-        to: TARGET,
-        text: LONG_REPLY,
-        onDeliveryResult,
-      } as never).catch((cause: unknown) => cause);
-
       const accepted = messageTexts(requests);
       expect(accepted).toHaveLength(1);
       const delivery = partialDelivery(outcome);
-      // A rejection that threw the accepted receipts away reports none of them.
       expect(delivery?.messageIds).toEqual(["om_accepted"]);
       expect(delivery?.receipt?.platformMessageIds).toEqual(["om_accepted"]);
-      // The evidence the delivery layer reads to tell a refused message apart from an
-      // answer that partly reached the reader. A raw no-dispatch rejection carries none.
       expect(delivery?.visibleReplySent).toBe(true);
-      // The accepted prefix is exactly the text of the one message that went out, not the
-      // authored answer and not the suffix the reader never saw.
       expect(delivery?.content).toBe(accepted[0]);
       expect(LONG_REPLY.length).toBeGreaterThan(delivery?.content?.length ?? 0);
     });
@@ -340,7 +291,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
         text: LONG_REPLY,
         onDeliveryResult,
       } as never).catch((cause: unknown) => cause);
-
       expectNotDispatched(outcome);
       expect(requests.map((request) => request.path)).toEqual([
         AUTH_PATH,
@@ -352,8 +302,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
       expect(delivery?.messageIds).toEqual(["reply_accepted"]);
       expect(delivery?.visibleReplySent).toBe(true);
       expect(delivery?.receipt?.platformMessageIds).toEqual(["reply_accepted"]);
-      // Exactly the reply the thread received. Asserting only that it is shorter than the
-      // authored answer would also accept an arbitrary wrong string.
       const acceptedReply = requests.find((request) => request.path === COMMENT_REPLY_PATH);
       expect(acceptedReply).toBeDefined();
       expect(delivery?.content).toEqual(
@@ -363,8 +311,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
     });
   });
 
-  // A presentation payload with an attachment is several platform messages behind the one
-  // authority check core made around this call: the upload and its message, then the card.
   it("stops a payload card once its sender retires after the media message", async () => {
     await withFeishuTransport(async ({ cfg, requests }) => {
       stubLoadedMedia();
@@ -382,9 +328,7 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
           presentation: { blocks: [{ type: "text", text: "One chart." }] },
         },
       } as never).catch((cause: unknown) => cause);
-
       expectNotDispatched(outcome);
-      // The upload and its message went out; the finalizing card never did.
       expect(requests.map((request) => request.path)).toEqual([AUTH_PATH, FILE_PATH, MESSAGE_PATH]);
       expect(delivered).toEqual(["om_accepted"]);
     });
@@ -403,10 +347,7 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
         mediaUrl: MEDIA_URL,
         onDeliveryResult,
       } as never).catch((cause: unknown) => cause);
-
       expectNotDispatched(outcome);
-      // The caption reached the reader; the attachment never started its upload, and the
-      // refusal never degraded into one more fallback message the turn no longer owns.
       expect(requests.map((request) => request.path)).toEqual([AUTH_PATH, MESSAGE_PATH]);
       expect(delivered).toEqual(["om_accepted"]);
       const delivery = partialDelivery(outcome);
@@ -416,10 +357,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
     });
   });
 
-  // A formatted reply this channel cuts itself is several platform messages behind one
-  // durable attempt, so an accepted prefix has to land on the queue as a send that partly
-  // happened: the remaining messages are not sent, and what the reader already has is not
-  // replayable.
   it("records an accepted prefix as a partial durable send that never replays", async () => {
     const deliveryIntentId = "feishu-handoff-durable-partial";
     await withStateDirEnv("openclaw-feishu-handoff-partial-", async ({ stateDir }) => {
@@ -449,8 +386,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
         if (outcome.status === "partial_failed") {
           expect(outcome.receipt.platformMessageIds).toEqual(["om_accepted"]);
         }
-        // An accepted prefix is not a wholly unsent send: it stays pending and ambiguous
-        // rather than being flattened to failed while the recovery decision is open.
         expect(readDeliveryQueueRow(stateDir, deliveryIntentId)).toMatchObject({
           status: "pending",
           recovery_state: "unknown_after_send",
@@ -465,16 +400,12 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
           selectEntry: (entry) => ({ match: entry.channel === "feishu", bypassBackoff: true }),
         });
 
-        // Nothing replays what the reader already has, and the drain settles the entry.
         expect(visibleRequests()).toHaveLength(1);
         expect(readDeliveryQueueRow(stateDir, deliveryIntentId)?.status).toBe("failed");
       });
     });
   });
 
-  // Dispatch has begun once the request is on the wire. A response lost after that point
-  // cannot prove the message was never delivered, so the entry records the ambiguity and
-  // nothing replays it.
   it("does not replay a Feishu message whose response is lost after dispatch", async () => {
     const deliveryIntentId = "feishu-handoff-lost-response";
     await withStateDirEnv("openclaw-feishu-handoff-ambiguous-", async ({ stateDir }) => {
@@ -482,7 +413,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
         registerFeishuPlugin();
         fixture.respond(async (request, response) => {
           if (request.path === MESSAGE_PATH) {
-            // A real request that started and then lost its response.
             response.destroy();
             return true;
           }
@@ -504,12 +434,9 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
           fixture.requests.filter((request) => request.path.startsWith(MESSAGE_PATH));
         expect(outcome.status).toBe("failed");
         expect(visibleRequests()).toHaveLength(1);
-        // The client refreshes the durable timing immediately before the request reaches
-        // the HTTP adapter, so a lost response is recorded as the ambiguous outcome it is.
         const row = readDeliveryQueueRow(stateDir, deliveryIntentId);
         expect(row).toMatchObject({ status: "pending", recovery_state: "unknown_after_send" });
         expect(row?.platform_send_started_at).toEqual(expect.any(Number));
-
         await drainPendingDeliveries({
           drainKey: "feishu:default",
           logLabel: "Feishu ambiguous provider recovery",
@@ -519,18 +446,12 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
           selectEntry: (entry) => ({ match: entry.channel === "feishu", bypassBackoff: true }),
         });
 
-        // A request count alone would also pass if the drain skipped the entry, so assert
-        // the entry itself reached a terminal state that refuses to replay.
         expect(visibleRequests()).toHaveLength(1);
         expect(readDeliveryQueueRow(stateDir, deliveryIntentId)?.status).toBe("failed");
       });
     });
   });
 
-  // The ambient send scope this adapter establishes around every text sender it advertises
-  // is what covers the window between core's own check and the request reaching the wire.
-  // Removing the `sendFormattedText` wrapper leaves this entry with no scope for the
-  // client's authority checks to find, and each case below then delivers the message.
   it.each([
     { stage: "token preparation", waitPath: AUTH_PATH },
     { stage: "the request interceptor", waitPath: MESSAGE_PATH },
@@ -564,7 +485,6 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
       await started.promise;
       sender.retire();
       release.resolve();
-
       expectNotDispatched(await outcome);
       expect(fixture.requests.map((request) => request.path)).toEqual([AUTH_PATH]);
     });

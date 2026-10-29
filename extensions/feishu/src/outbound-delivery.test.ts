@@ -142,16 +142,6 @@ describe("Feishu outbound shared delivery", () => {
     expect(deliveredText).toContain(`- ${label}: \`/open-run\``);
   });
 
-  // The card builder owns a table block only on the direct-send actions, which hand it the
-  // authored presentation. This path does not: the shared adapter degrades the block to the
-  // fallback type this channel advertises and cuts that linear form to the text limit before
-  // the plugin renders anything, so what the card carries here is a run of context blocks.
-  // The cut is the one a reviewer worries about, so the assertions below are on what the
-  // card actually received: every element inside the limit, every row still there, the grey
-  // the degraded block asks for, and no pipe row for the cut to break, because the linear
-  // form of a table block has none. Projecting the block before adaptation, or advertising a
-  // native table this card does not draw, hands the builder plain text blocks and the grey
-  // goes, for a one-row table as much as for this one.
   it("splits an oversized table block into context elements the card keeps grey", async () => {
     const rows = 60;
     await sendDurableMessageBatch({
@@ -194,7 +184,6 @@ describe("Feishu outbound shared delivery", () => {
       }
     )?.card;
     const elements = (card?.body?.elements ?? []).map((element) => element.content ?? "");
-    // Guard the fixture: one element would not exercise the adapter's cut at all.
     expect(elements.length).toBeGreaterThan(1);
     for (const content of elements) {
       expect(content.length).toBeLessThanOrEqual(4000);
@@ -226,8 +215,6 @@ describe("Feishu outbound shared delivery", () => {
       createTestRegistry([{ pluginId: "feishu", plugin: feishuPlugin, source: "test" }]),
     );
     if (!started) {
-      // An unavailable runtime takes down every text sender the channel advertises. Leaving
-      // one of them resolvable is a runtime that works, and core would route to it.
       feishuChannelRuntime.feishuOutbound.sendText = undefined;
       feishuChannelRuntime.feishuOutbound.sendFormattedText = undefined;
     }

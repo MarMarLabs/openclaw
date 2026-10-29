@@ -1,276 +1,42 @@
-// Feishu tests cover reply dispatcher table limits, fences and preview projection.
+import "./reply-dispatcher.tables.test-support.js";
 import type { MarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
-import {
-  createEmptyPluginRegistry,
-  createTestRegistry,
-  resetPluginRuntimeStateForTest,
-  setActivePluginRegistry,
-} from "openclaw/plugin-sdk/plugin-test-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { afterAll, afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
-import type { ClawdbotConfig } from "../runtime-api.js";
+import { describe, expect, it } from "vitest";
+import { createFeishuReplyDeliveryResult } from "./reply-delivery-result.js";
 import type { FeishuStreamingSession } from "./streaming-card.js";
 
-type StreamingSessionStub = {
-  active: boolean;
-  credentials: unknown;
-  start: ReturnType<typeof vi.fn>;
-  updated: ReturnType<typeof Promise.withResolvers<void>>;
-  update: ReturnType<typeof vi.fn>;
-  closeWithResult: Mock<FeishuStreamingSession["closeWithResult"]>;
-  discard: Mock<FeishuStreamingSession["discard"]>;
-  isActive: ReturnType<typeof vi.fn>;
-};
-
-const resolveFeishuAccountMock = vi.hoisted(() => vi.fn());
-const getFeishuRuntimeMock = vi.hoisted(() => vi.fn());
-const getGlobalHookRunnerMock = vi.hoisted(() => vi.fn());
-const sendMessageFeishuMock = vi.hoisted(() => vi.fn());
-const sendStructuredCardFeishuMock = vi.hoisted(() => vi.fn());
-const sendCardFeishuMock = vi.hoisted(() => vi.fn());
-const sendMediaFeishuMock = vi.hoisted(() => vi.fn());
-const createFeishuClientMock = vi.hoisted(() => vi.fn());
-const resolveReceiveIdTypeMock = vi.hoisted(() => vi.fn());
-const addTypingIndicatorMock = vi.hoisted(() => vi.fn(async () => ({ messageId: "om_msg" })));
-const removeTypingIndicatorMock = vi.hoisted(() => vi.fn(async () => {}));
-const streamingInstances = vi.hoisted((): StreamingSessionStub[] => []);
-const shouldSuppressFeishuTextForVoiceMediaMock = vi.hoisted(
-  () =>
-    (params: {
-      mediaUrl?: string;
-      audioAsVoice?: boolean;
-      ttsSupplement?: { visibleTextAlreadyDelivered?: boolean };
-    }) =>
-      params.ttsSupplement
-        ? params.ttsSupplement.visibleTextAlreadyDelivered === true
-        : params.audioAsVoice === true || /\.(?:ogg|opus)(?:[?#]|$)/i.test(params.mediaUrl ?? ""),
-);
-const resolvePinnedHostnameWithPolicyMock = vi.hoisted(() =>
-  vi.fn(async (hostname: string) => {
-    if (hostname === "files.example.test") {
-      throw new Error("Blocked: resolves to private/internal/special-use IP address");
-    }
-    return {
-      hostname,
-      addresses: ["93.184.216.34"],
-      lookup: vi.fn(),
-    };
-  }),
-);
-
-vi.mock("./accounts.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./accounts.js")>()),
-  resolveFeishuAccount: resolveFeishuAccountMock,
-  resolveFeishuRuntimeAccount: resolveFeishuAccountMock,
-}));
-vi.mock("./runtime.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./runtime.js")>()),
-  getFeishuRuntime: getFeishuRuntimeMock,
-}));
-vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return { ...actual, getGlobalHookRunner: getGlobalHookRunnerMock };
-});
-vi.mock("./send.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./send.js")>()),
-  sendMessageFeishu: sendMessageFeishuMock,
-  sendStructuredCardFeishu: sendStructuredCardFeishuMock,
-  sendCardFeishu: sendCardFeishuMock,
-}));
-vi.mock("./media.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./media.js")>()),
-  sendMediaFeishu: sendMediaFeishuMock,
-  shouldSuppressFeishuTextForVoiceMedia: shouldSuppressFeishuTextForVoiceMediaMock,
-}));
-vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    resolvePinnedHostnameWithPolicy: resolvePinnedHostnameWithPolicyMock,
-  };
-});
-vi.mock("./client.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./client.js")>()),
-  createFeishuClient: createFeishuClientMock,
-}));
-vi.mock("./targets.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./targets.js")>()),
-  resolveReceiveIdType: resolveReceiveIdTypeMock,
-}));
-vi.mock("./typing.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./typing.js")>()),
-  addTypingIndicator: addTypingIndicatorMock,
-  removeTypingIndicator: removeTypingIndicatorMock,
-}));
-vi.mock("./streaming-card.js", async (importOriginal) => {
-  return {
-    ...(await importOriginal<typeof import("./streaming-card.js")>()),
-    FeishuStreamingSession: class {
-      active = false;
-      credentials: unknown;
-      start = vi.fn(async () => {
-        this.active = true;
-      });
-      updated = Promise.withResolvers<void>();
-      update = vi.fn(async () => {
-        this.updated.resolve();
-      });
-      closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
-        this.active = false;
-        return createFeishuReplyDeliveryResult({
-          results: [{ messageId: "om_stream" }],
-          visibleReplySent: Boolean(text?.trim()),
-          ...(text?.trim() ? { content: text } : {}),
-          kind: "card",
-        });
-      });
-      discard = vi.fn<FeishuStreamingSession["discard"]>(async () => {
-        this.active = false;
-        return { visibleReplySent: false };
-      });
-      isActive = vi.fn(() => this.active);
-
-      constructor(_client: unknown, credentials: unknown) {
-        this.credentials = credentials;
-        streamingInstances.push(this);
-      }
-    },
-  };
-});
-
-import { createFeishuReplyDeliveryResult } from "./reply-delivery-result.js";
-import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
-import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
-
+const {
+  bulletsCard,
+  codeText,
+  createBlockTableHarness,
+  createDispatcherHarness,
+  createReplyAccount,
+  deliverFinal,
+  getFeishuRuntimeMock,
+  installTableDispatcherHarness,
+  outgrowingTable,
+  pipelessTableMarkdown,
+  requireStreamingInstance,
+  resolveFeishuAccountMock,
+  sendCardFeishuMock,
+  sendMessageFeishuMock,
+  sendStructuredCardFeishuMock,
+  streamingInstances,
+  streamingUpdateTexts,
+  tableCfg,
+  tableMarkdown,
+  useRealMarkdownChunker,
+} = await import("./reply-dispatcher.tables.test-support.js");
 type StreamingCloseResult = Awaited<ReturnType<FeishuStreamingSession["closeWithResult"]>>;
 
-afterAll(() => {
-  vi.doUnmock("./accounts.js");
-  vi.doUnmock("./runtime.js");
-  vi.doUnmock("./send.js");
-  vi.doUnmock("./media.js");
-  vi.doUnmock("./client.js");
-  vi.doUnmock("./targets.js");
-  vi.doUnmock("./typing.js");
-  vi.doUnmock("./streaming-card.js");
-  vi.doUnmock("openclaw/plugin-sdk/ssrf-runtime");
-  vi.doUnmock("openclaw/plugin-sdk/plugin-runtime");
-  vi.resetModules();
-});
-
-describe("createFeishuReplyDispatcher table limits", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    streamingStartBackoffUntilByAccount.clear();
-    streamingInstances.length = 0;
-    sendMediaFeishuMock.mockReset().mockResolvedValue(undefined);
-    sendStructuredCardFeishuMock.mockReset().mockResolvedValue(undefined);
-    sendCardFeishuMock.mockReset().mockResolvedValue({ messageId: "om_card" });
-    getGlobalHookRunnerMock.mockReturnValue(null);
-
-    resolveFeishuAccountMock.mockReturnValue({
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain: "feishu",
-      config: {
-        renderMode: "auto",
-        streaming: { mode: "partial" },
-        httpTimeoutMs: 45_000,
-      },
-    });
-
-    resolveReceiveIdTypeMock.mockReturnValue("chat_id");
-    createFeishuClientMock.mockReturnValue({});
-
-    getFeishuRuntimeMock.mockReturnValue({
-      channel: {
-        text: {
-          resolveTextChunkLimit: vi.fn(() => 4000),
-          resolveChunkMode: vi.fn(() => "line"),
-          resolveMarkdownTableMode: vi.fn(() => "block"),
-          convertMarkdownTables: vi.fn((text) => text),
-          chunkTextWithMode: vi.fn((text) => [text]),
-          chunkMarkdownTextWithMode: vi.fn((text) => [text]),
-        },
-        reply: {
-          resolveHumanDelayConfig: vi.fn(() => undefined),
-        },
-      },
-    });
-  });
-  type ReplyDispatcherArgs = Parameters<typeof createFeishuReplyDispatcher>[0];
-  type ReplyDispatcherPlan = ReturnType<typeof createFeishuReplyDispatcher>;
-  type TypingDispatcherOptions = ReplyDispatcherPlan["dispatcherOptions"] &
-    ReplyDispatcherPlan["delivery"];
-  function createReplyAccount(
-    renderMode: "auto" | "card",
-    streamingMode: "off" | "partial",
-    domain: "feishu" | "lark",
-  ) {
-    return {
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain,
-      config: {
-        renderMode,
-        streaming: { mode: streamingMode },
-      },
-    };
-  }
-  function createDispatcherHarness(overrides: Partial<ReplyDispatcherArgs> = {}) {
-    const result = createFeishuReplyDispatcher({
-      cfg: {} as never,
-      agentId: "agent",
-      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
-      chatId: "oc_chat",
-      sendTarget: "oc_chat",
-      ...overrides,
-    });
-
-    return {
-      result,
-      options: toTypingDispatcherOptions(result),
-    };
-  }
-  function toTypingDispatcherOptions(result: ReplyDispatcherPlan): TypingDispatcherOptions {
-    return { ...result.dispatcherOptions, ...result.delivery };
-  }
+describe("createFeishuReplyDispatcher table limits and preview budget", () => {
+  installTableDispatcherHarness();
+  const fencedTableSample = "```\n| Name | Role |\n| --- | --- |\n| Ada | Lead |\n```";
+  const firstStreamingCloseText = () =>
+    String(requireStreamingInstance(0).closeWithResult.mock.calls[0]?.[0]);
   function requireRecord(value: unknown, label: string): Record<string, unknown> {
     expect(isRecord(value), `${label} must be an object`).toBe(true);
     return value as Record<string, unknown>;
-  }
-  function requireStreamingInstance(instanceIndex: number): StreamingSessionStub {
-    const instance = streamingInstances[instanceIndex];
-    if (!instance) {
-      throw new Error(`Expected streaming instance ${instanceIndex}`);
-    }
-    return instance;
-  }
-  function firstStreamingCloseText(instanceIndex = 0): string {
-    const close = requireStreamingInstance(instanceIndex).closeWithResult;
-    return String(firstMockArg(close, "streaming close"));
-  }
-  function streamingUpdateTexts(instanceIndex = 0): string[] {
-    return requireStreamingInstance(instanceIndex).update.mock.calls.map((call: unknown[]) =>
-      typeof call[0] === "string" ? call[0] : "",
-    );
-  }
-  function mockArg(
-    mock: ReturnType<typeof vi.fn>,
-    callIndex: number,
-    argIndex: number,
-    label: string,
-  ) {
-    const call = mock.mock.calls[callIndex];
-    if (!call) {
-      throw new Error(`missing ${label} call ${callIndex + 1}`);
-    }
-    return call[argIndex];
-  }
-  function firstMockArg(mock: ReturnType<typeof vi.fn>, label: string, argIndex = 0) {
-    return mockArg(mock, 0, argIndex, label);
   }
   const approvalPresentation = {
     title: "Plugin bind approval required",
@@ -290,158 +56,37 @@ describe("createFeishuReplyDispatcher table limits", () => {
       (call) => requireRecord(call[0], "native card send").card,
     );
   }
-  async function deliverFinal(
-    tables: MarkdownTableMode | undefined,
-    streaming: "off" | "partial",
-    text = tableMarkdown,
-  ) {
-    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", streaming, "feishu"));
-    const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg(tables) });
-    const delivery = await options.deliver({ text }, { kind: "final" });
-    await options.onIdle?.();
-    await delivery?.finalization;
-  }
-  const tableMarkdown = "| Name | Role |\n| --- | --- |\n| Ada | Lead |";
-  async function useRealMarkdownChunker() {
-    const chunking = await vi.importActual<typeof import("openclaw/plugin-sdk/reply-chunking")>(
-      "openclaw/plugin-sdk/reply-chunking",
-    );
-    getFeishuRuntimeMock().channel.text.chunkMarkdownTextWithMode.mockImplementation(
-      chunking.chunkMarkdownTextWithMode,
-    );
-  }
-  // GFM makes the outer pipes optional, and a fence hides rows that only look like a table.
-  const pipelessTableMarkdown = "Name | Role\n--- | ---\nAda | Lead";
-  const fencedTableSample = "```\n| Name | Role |\n| --- | --- |\n| Ada | Lead |\n```";
-  const bulletsCard = "**Ada**\n• Role: Lead";
-  let codeText = "";
 
-  beforeEach(async () => {
-    sendMessageFeishuMock.mockReset();
-    const actual = await vi.importActual<
-      typeof import("openclaw/plugin-sdk/markdown-table-runtime")
-    >("openclaw/plugin-sdk/markdown-table-runtime");
-    codeText = actual.convertMarkdownTables(tableMarkdown, "code");
-    const runtime = getFeishuRuntimeMock();
-    getFeishuRuntimeMock.mockReturnValue({
-      ...runtime,
-      channel: {
-        ...runtime.channel,
-        text: {
-          ...runtime.channel.text,
-          resolveMarkdownTableMode: actual.resolveMarkdownTableMode,
-          convertMarkdownTables: actual.convertMarkdownTables,
-        },
-      },
-    });
-    // Feishu declares block as its plugin default; the harness registers the
-    // same meta because it does not load the runtime setup.
-    setActivePluginRegistry(
-      createTestRegistry([
-        {
-          pluginId: "feishu",
-          source: "test",
-          plugin: {
-            id: "feishu",
-            meta: { id: "feishu" },
-            messaging: { defaultMarkdownTableMode: "block" },
-          },
-        },
-      ]),
-    );
-  });
-
-  afterEach(() => {
-    resetPluginRuntimeStateForTest();
-    setActivePluginRegistry(createEmptyPluginRegistry());
-  });
-
-  function tableCfg(tables?: MarkdownTableMode): ClawdbotConfig {
-    return tables ? { channels: { feishu: { markdown: { tables } } } } : {};
-  }
-
-  function createBlockTableHarness(
-    cfg: ClawdbotConfig = tableCfg("off"),
-    allowReasoningPreview = false,
-  ) {
-    resolveFeishuAccountMock.mockReturnValue({
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain: "feishu",
-      config: {
-        renderMode: "auto",
-        streaming: { mode: "partial", block: { enabled: true } },
-      },
-    });
-    return createDispatcherHarness({ accountId: "main", cfg, allowReasoningPreview });
-  }
-
-  it("routes an off final with a table to the post path instead of a streaming card", async () => {
-    await deliverFinal("off", "partial");
-
+  it.each(
+    [
+      { shape: "piped", text: tableMarkdown },
+      { shape: "pipeless", text: pipelessTableMarkdown },
+    ].flatMap(({ shape, text }) =>
+      (["final", "block"] as const).map((kind) => ({ shape, text, kind })),
+    ),
+  )("posts an off $kind carrying a $shape table instead of a streaming card", async (row) => {
+    if (row.kind === "final") {
+      await deliverFinal("off", "partial", row.text);
+    } else {
+      const { options } = createBlockTableHarness(tableCfg("off"));
+      await options.deliver({ text: row.text }, { kind: "block" });
+      await options.onIdle?.();
+    }
     expect(streamingInstances).toHaveLength(0);
-    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
-      expect.objectContaining({ text: tableMarkdown }),
-    );
-    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
-  });
-
-  it("routes an off final with a pipeless GFM table to the post path", async () => {
-    await deliverFinal("off", "partial", pipelessTableMarkdown);
-
-    expect(streamingInstances).toHaveLength(0);
-    expect(sendMessageFeishuMock).toHaveBeenCalled();
-    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { shape: "piped", text: tableMarkdown },
-    { shape: "pipeless", text: pipelessTableMarkdown },
-  ])("posts an off block carrying a $shape table under block streaming", async ({ text }) => {
-    resolveFeishuAccountMock.mockReturnValue({
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain: "feishu",
-      config: {
-        renderMode: "auto",
-        streaming: { mode: "partial", block: { enabled: true } },
-      },
-    });
-    const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg("off") });
-
-    await options.deliver({ text }, { kind: "block" });
-    await options.onIdle?.();
-
-    expect(streamingInstances).toHaveLength(0);
-    expect(sendMessageFeishuMock).toHaveBeenCalled();
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(expect.objectContaining({ text: row.text }));
     expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
   });
 
   it("keeps an off block without a table on the streaming card", async () => {
-    resolveFeishuAccountMock.mockReturnValue({
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain: "feishu",
-      config: {
-        renderMode: "auto",
-        streaming: { mode: "partial", block: { enabled: true } },
-      },
-    });
-    const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg("off") });
-
+    const { options } = createBlockTableHarness(tableCfg("off"));
     await options.deliver({ text: "plain block" }, { kind: "block" });
     await options.onIdle?.();
-
-    expect(requireStreamingInstance(0).closeWithResult.mock.calls[0]?.[0]).toBe("plain block");
+    expect(firstStreamingCloseText()).toBe("plain block");
     expect(sendMessageFeishuMock).not.toHaveBeenCalled();
   });
 
   it("keeps an off final whose only table is inside a fence on the card path", async () => {
     await deliverFinal("off", "off", fencedTableSample);
-
     expect(sendStructuredCardFeishuMock).toHaveBeenCalledWith(
       expect.objectContaining({ text: fencedTableSample }),
     );
@@ -449,18 +94,16 @@ describe("createFeishuReplyDispatcher table limits", () => {
   });
 
   it("discards an open preview when an off final carries a table", async () => {
-    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "partial", "feishu"));
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "partial"));
     const { result, options } = createDispatcherHarness({
       accountId: "main",
       cfg: tableCfg("off"),
     });
     result.replyOptions.onPartialReply?.({ text: tableMarkdown });
     expect(streamingInstances).toHaveLength(1);
-
     const delivery = await options.deliver({ text: tableMarkdown }, { kind: "final" });
     await options.onIdle?.();
     await delivery?.finalization;
-
     const instance = requireStreamingInstance(0);
     expect(instance.discard).toHaveBeenCalledTimes(1);
     expect(instance.closeWithResult).not.toHaveBeenCalled();
@@ -476,7 +119,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   ])(
     "posts an idle-closed $shape table preview and assigns it to the matching final in off mode",
     async ({ text }) => {
-      resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "partial", "feishu"));
+      resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "partial"));
       const { result, options } = createDispatcherHarness({
         accountId: "main",
         cfg: tableCfg("off"),
@@ -503,13 +146,11 @@ describe("createFeishuReplyDispatcher table limits", () => {
       });
       sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om-table-post" });
       const idle = Promise.resolve(options.onIdle?.());
-      // Hold whichever way the close leaves the card so the final races it.
       await closeStarted.promise;
       expect(instance.discard.mock.calls.length + instance.closeWithResult.mock.calls.length).toBe(
         1,
       );
       instance.active = false;
-
       const delivery = await options.deliver({ text }, { kind: "final" });
       resolveDiscard({ visibleReplySent: false, content: "" });
       resolveClose(
@@ -521,7 +162,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
         }),
       );
       await idle;
-
       expect(instance.closeWithResult).not.toHaveBeenCalled();
       expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
       expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
@@ -536,7 +176,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   it.each(["bullets", "code"] as const)(
     "assigns an idle-closed table preview to its matching final in %s mode",
     async (tables) => {
-      resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "partial", "feishu"));
+      resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "partial"));
       const { result, options } = createDispatcherHarness({
         accountId: "main",
         cfg: tableCfg(tables),
@@ -558,7 +198,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
       expect(instance.closeWithResult).toHaveBeenCalledTimes(1);
       instance.active = false;
       const committed = String(instance.closeWithResult.mock.calls[0]?.[0]);
-
       const delivery = await options.deliver({ text: tableMarkdown }, { kind: "final" });
       resolveClose(
         createFeishuReplyDeliveryResult({
@@ -569,7 +208,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
         }),
       );
       await idle;
-
       expect(committed).not.toBe(tableMarkdown);
       await expect(delivery?.finalization).resolves.toMatchObject({
         messageIds: ["om-table"],
@@ -586,9 +224,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
     { tables: "code" as const, converted: () => codeText },
   ];
 
-  // Mirrors the dispatcher's reasoning formatter in one place rather than inline at
-  // each call site: structure the renderer has to recognize stays plain, prose is
-  // italic. Kept here so a change to that rule updates one expectation, not three.
   const reasoningStructureLine = /^\s*(?:```|\||[-*+\u2022]\s|\d+[.)]\s)/u;
   const expectedReasoning = (text: string): string => {
     let insideFence = false;
@@ -607,8 +242,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
     );
   };
 
-  // The account that sends is the one the resolver picked, which is not always the
-  // one the request named. A table mode configured on that account has to apply.
   it("reads the table mode from the account the request resolves to", async () => {
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",
@@ -628,7 +261,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
     const instance = requireStreamingInstance(0);
     await instance.updated.promise;
     expect(instance.update).toHaveBeenCalled();
-
     expect(instance.update.mock.calls.at(-1)?.[0]).toBe(codeText);
   });
 
@@ -636,13 +268,11 @@ describe("createFeishuReplyDispatcher table limits", () => {
     "projects a $tables table into the card while it is still streaming",
     async ({ tables, converted }) => {
       const { result } = createBlockTableHarness(tableCfg(tables));
-
       result.replyOptions.onPartialReply?.({ text: tableMarkdown });
       expect(streamingInstances).toHaveLength(1);
       const instance = requireStreamingInstance(0);
       await instance.updated.promise;
       expect(instance.update).toHaveBeenCalled();
-
       expect(instance.update.mock.calls.at(-1)?.[0]).toBe(converted());
     },
   );
@@ -652,17 +282,14 @@ describe("createFeishuReplyDispatcher table limits", () => {
     async ({ tables, converted }) => {
       const { result, options } = createBlockTableHarness(tableCfg(tables));
       const delivery = await options.deliver({ text: tableMarkdown }, { kind: "block" });
-
       result.replyOptions.onPartialReply?.({
         text: `${tableMarkdown}\n\nInventory complete.`,
       });
       await options.onIdle?.();
       await delivery?.finalization;
-
       expect(firstStreamingCloseText()).toBe(`${converted()}\n\nInventory complete.`);
       expect(requireStreamingInstance(0).closeWithResult).toHaveBeenCalledTimes(1);
       expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-      // Changing the answer representation must not erase reasoning formatting.
       for (const kind of ["block", "final"] as const) {
         const { options: reasoningOptions } = createBlockTableHarness(tableCfg(tables));
         await reasoningOptions.deliver({ text: tableMarkdown, isReasoning: true }, { kind });
@@ -676,66 +303,50 @@ describe("createFeishuReplyDispatcher table limits", () => {
     },
   );
 
-  it.each(convertingModes)(
-    "commits one table when a $tables block repeats its streamed preview",
-    async ({ tables, converted }) => {
-      const { result, options } = createBlockTableHarness(tableCfg(tables));
-      result.replyOptions.onPartialReply?.({ text: tableMarkdown });
+  it.each([
+    ...convertingModes.flatMap(({ tables, converted }) => [
+      {
+        tables,
+        after: "the same preview",
+        preview: tableMarkdown,
+        block: tableMarkdown,
+        closed: converted(),
+      },
+      {
+        tables,
+        after: "another preview",
+        preview: "Intro line.",
+        block: `\n\n${tableMarkdown}`,
+        closed: `Intro line.\n\n${converted()}`,
+      },
+      {
+        tables,
+        after: "no preview",
+        preview: undefined,
+        block: tableMarkdown,
+        closed: converted(),
+      },
+    ]),
+    ...(["block", undefined] as const).map((tables) => ({
+      tables,
+      after: "the same preview",
+      preview: tableMarkdown,
+      block: tableMarkdown,
+      closed: tableMarkdown,
+    })),
+  ])("commits one $tables table mirrored from a block after $after", async (row) => {
+    const { result, options } = createBlockTableHarness(tableCfg(row.tables));
+    if (row.preview !== undefined) {
+      result.replyOptions.onPartialReply?.({ text: row.preview });
       expect(streamingInstances).toHaveLength(1);
-
-      await options.deliver({ text: tableMarkdown }, { kind: "block" });
-      await options.onIdle?.();
-
-      expect(requireStreamingInstance(0).closeWithResult).toHaveBeenCalledTimes(1);
-      expect(firstStreamingCloseText()).toBe(converted());
-      expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-      expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(convertingModes)(
-    "still mirrors $tables block text the preview never streamed",
-    async ({ tables, converted }) => {
-      const { result, options } = createBlockTableHarness(tableCfg(tables));
-      result.replyOptions.onPartialReply?.({ text: "Intro line." });
-      expect(streamingInstances).toHaveLength(1);
-
-      await options.deliver({ text: `\n\n${tableMarkdown}` }, { kind: "block" });
-      await options.onIdle?.();
-
-      expect(firstStreamingCloseText()).toBe(`Intro line.\n\n${converted()}`);
-      expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(convertingModes)(
-    "mirrors a $tables block that arrives without any preview",
-    async ({ tables, converted }) => {
-      const { options } = createBlockTableHarness(tableCfg(tables));
-
-      await options.deliver({ text: tableMarkdown }, { kind: "block" });
-      await options.onIdle?.();
-
-      expect(firstStreamingCloseText()).toBe(converted());
-      expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["block", undefined] as const)(
-    "keeps one native table when a %s block repeats its streamed preview",
-    async (tables) => {
-      const { result, options } = createBlockTableHarness(tableCfg(tables));
-      result.replyOptions.onPartialReply?.({ text: tableMarkdown });
-      expect(streamingInstances).toHaveLength(1);
-
-      await options.deliver({ text: tableMarkdown }, { kind: "block" });
-      await options.onIdle?.();
-
-      expect(requireStreamingInstance(0).closeWithResult).toHaveBeenCalledTimes(1);
-      expect(firstStreamingCloseText()).toBe(tableMarkdown);
-      expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-    },
-  );
+    }
+    await options.deliver({ text: row.block }, { kind: "block" });
+    await options.onIdle?.();
+    expect(requireStreamingInstance(0).closeWithResult).toHaveBeenCalledTimes(1);
+    expect(firstStreamingCloseText()).toBe(row.closed);
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+  });
 
   function presentationCardMarkdown(index = 0): string[] {
     const card = requireRecord(presentationCardBodies()[index], "presentation card");
@@ -748,7 +359,7 @@ describe("createFeishuReplyDispatcher table limits", () => {
   }
 
   async function deliverPresentationTable(tables: MarkdownTableMode | undefined) {
-    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "off", "feishu"));
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "off"));
     const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg(tables) });
     return await options.deliver(
       { text: tableMarkdown, presentation: approvalPresentation },
@@ -780,7 +391,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
       expect(presentationCardMarkdown()).toEqual([
         converted(),
         converted(),
-        // `code` converts the table to a fence, which cannot survive the color tag.
         tables === "code" ? converted() : `<font color='grey'>${converted()}</font>`,
       ]);
       expect(delivery?.content?.split(converted())).toHaveLength(4);
@@ -790,37 +400,28 @@ describe("createFeishuReplyDispatcher table limits", () => {
     },
   );
 
-  it.each(convertingModes)(
-    "converts the table a $tables presentation card carries",
-    async ({ tables, converted }) => {
-      const delivery = await deliverPresentationTable(tables);
-
-      expect(sendCardFeishuMock).toHaveBeenCalledTimes(1);
-      const markdown = presentationCardMarkdown();
-      expect(markdown[0]).toBe(converted());
+  it.each([
+    ...convertingModes,
+    ...(["block", undefined] as const).map((tables) => ({
+      tables,
+      converted: () => tableMarkdown,
+    })),
+  ])("carries the $tables table a presentation card shows", async ({ tables, converted }) => {
+    const delivery = await deliverPresentationTable(tables);
+    expect(sendCardFeishuMock).toHaveBeenCalledTimes(1);
+    const markdown = presentationCardMarkdown();
+    expect(markdown[0]).toBe(converted());
+    expect(delivery?.content).toContain(converted());
+    if (tables === "bullets" || tables === "code") {
       expect(markdown.join("\n")).not.toContain("| --- |");
-      // The card's prose, the fallback the peer keeps and the reported content agree.
-      expect(delivery?.content).toContain(converted());
       expect(delivery?.content).not.toContain("| --- |");
-      expect(sendMessageFeishuMock).not.toHaveBeenCalled();
-      expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["block", undefined] as const)(
-    "keeps the native table a %s presentation card carries",
-    async (tables) => {
-      const delivery = await deliverPresentationTable(tables);
-
-      expect(sendCardFeishuMock).toHaveBeenCalledTimes(1);
-      expect(presentationCardMarkdown()[0]).toBe(tableMarkdown);
-      expect(delivery?.content).toContain(tableMarkdown);
-    },
-  );
+    }
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+  });
 
   it("keeps off presentation tables literal while retaining controls and authored receipts", async () => {
     const delivery = await deliverPresentationTable("off");
-
     expect(sendCardFeishuMock).toHaveBeenCalledTimes(1);
     expect(presentationCardMarkdown()[0]).toBe(
       "| Name | Role |\n| &#45;-- | --- |\n| Ada | Lead |",
@@ -833,34 +434,18 @@ describe("createFeishuReplyDispatcher table limits", () => {
     expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
   });
 
-  // `code` pads every cell and adds a fence, so an answer that fits the chunk limit as
-  // authored can leave it once the preview projects it. The preview carries the
-  // projected form, so that is the form the limit asks about: past it, the close sends
-  // the answer through the chunked path and an update would spend the generation on a
-  // card element the target refuses.
   it("holds the preview back once the projected answer outgrows the chunk limit", async () => {
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
     const fits = tableMarkdown;
-    const outgrows = [
-      "| name | detail |",
-      "| --- | --- |",
-      ...Array.from({ length: 40 }, (_entry, index) => `| row${index} | d |`),
-      `| wide | ${"w".repeat(220)} |`,
-    ].join("\n");
-    // Guard the fixture: both fit the limit as authored, and only one projection stays
-    // inside it.
+    const outgrows = outgrowingTable;
     expect(outgrows.length).toBeLessThanOrEqual(4000);
     expect(convert(fits, "code").length).toBeLessThanOrEqual(4000);
     expect(convert(outgrows, "code").length).toBeGreaterThan(4000);
-
-    // The same shape either side of the limit, so the empty half below is a decision
-    // and not a preview that never ran.
     const fitting = createBlockTableHarness(tableCfg("code"));
     fitting.result.replyOptions.onPartialReply?.({ text: fits });
     expect(streamingInstances).toHaveLength(1);
     await fitting.options.deliver({ text: fits }, { kind: "final" });
     expect(streamingUpdateTexts(0)).toContain(convert(fits, "code"));
-
     const outgrowing = createBlockTableHarness(tableCfg("code"));
     outgrowing.result.replyOptions.onPartialReply?.({ text: outgrows });
     expect(streamingInstances).toHaveLength(2);
@@ -868,80 +453,26 @@ describe("createFeishuReplyDispatcher table limits", () => {
     expect(streamingUpdateTexts(1)).toEqual([]);
   });
 
-  // The payload is rendered before delivery, so the post path receives text that already
-  // carries its fences. Asking whether this step produced them answered nothing, and a
-  // quoted table then reached separate messages with unmatched markers.
-  it("posts a quoted table as authored when the cut cannot carry its fences", async () => {
-    await useRealMarkdownChunker();
-    resolveFeishuAccountMock.mockReturnValue({
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain: "feishu",
-      config: { renderMode: "raw", streaming: { mode: "off" } },
-    });
-    const rows = Array.from({ length: 40 }, (_entry, index) => `> | row${index} | d |`);
-    const text = [
-      "> | name | detail |",
-      "> | --- | --- |",
-      ...rows,
-      `> | wide | ${"w".repeat(220)} |`,
-    ].join("\n");
-    const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
-    // The case only means anything while the conversion carries quoted markers and needs
-    // more than one message to arrive.
-    expect(convert(text, "code")).toContain("> ```");
-    expect(convert(text, "code").length).toBeGreaterThan(4000);
-
-    const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg("code") });
-    await options.deliver({ text }, { kind: "final" });
-
-    const posts = sendMessageFeishuMock.mock.calls.map((call) => String(call[0]?.text ?? ""));
-    expect(posts.length).toBeGreaterThan(0);
-    for (const post of posts) {
-      // A message opens and closes its own fences or carries none at all.
-      expect((post.match(/^> ```/gmu) ?? []).length % 2).toBe(0);
-    }
-    expect(posts.join("")).toContain("row39");
-  });
-
-  // A close writes its whole text in one go. The preview stands down once a conversion
-  // outgrows the limit the settled answer is held to, and the close has to settle the same
-  // way or it writes the projection the preview was refusing.
   it("closes an outgrown projection through a post rather than the card", async () => {
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
-    const outgrows = [
-      "| name | detail |",
-      "| --- | --- |",
-      ...Array.from({ length: 40 }, (_entry, index) => `| row${index} | d |`),
-      `| wide | ${"w".repeat(220)} |`,
-    ].join("\n");
-    // Guard the fixture: it fits the limit as authored and its projection does not.
+    const outgrows = outgrowingTable;
     expect(outgrows.length).toBeLessThanOrEqual(4000);
     expect(convert(outgrows, "code").length).toBeGreaterThan(4000);
-
     const { result, options } = createBlockTableHarness(tableCfg("code"));
     result.replyOptions.onPartialReply?.({ text: outgrows });
     expect(streamingInstances).toHaveLength(1);
     await options.onIdle?.();
-
     expect(requireStreamingInstance(0).closeWithResult).not.toHaveBeenCalled();
     expect(requireStreamingInstance(0).discard).toHaveBeenCalledTimes(1);
     expect(sendMessageFeishuMock).toHaveBeenCalled();
   });
 
-  // The card carries the reasoning wrapped and set beside the answer, so the limit belongs
-  // to that whole body and not to the answer alone. Two conversions that each fit it can
-  // still write a card past it, which is the message the preview was already refusing.
-  // Only the projection answers to this, so the authored half below still closes on the
-  // card: text the author wrote long streams the way it always has.
   it.each(["table", "plain", "authored"] as const)(
     "closes the whole projected body through a post, not the answer half alone (%s)",
     async (answerKind) => {
       await useRealMarkdownChunker();
       const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
       const half = [
-        // Post soft breaks grow the quoted prose enough to cut the projected table's fence.
         ...Array.from({ length: 250 }, () => "r"),
         "",
         "| name | detail |",
@@ -953,7 +484,6 @@ describe("createFeishuReplyDispatcher table limits", () => {
       const answer = { table: half, plain: "p".repeat(2_000), authored: "a".repeat(2_500) }[
         answerKind
       ];
-      // Only table projection causes post recovery; authored-long text still closes on a card.
       if (answerKind === "authored") {
         expect(convert(reasoning, "code")).toBe(reasoning);
         expect(convert(answer, "code")).toBe(answer);
@@ -995,27 +525,16 @@ describe("createFeishuReplyDispatcher table limits", () => {
     },
   );
 
-  // Reasoning shares the card with the answer, and its own conversion can outgrow the
-  // limit the answer preview answers to. It gives way to the text as authored there.
   it("shows reasoning as authored when its conversion outgrows the chunk limit", async () => {
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
-    const outgrows = [
-      "| name | detail |",
-      "| --- | --- |",
-      ...Array.from({ length: 40 }, (_entry, index) => `| row${index} | d |`),
-      `| wide | ${"w".repeat(220)} |`,
-    ].join("\n");
-    // Guard the fixture: authored inside the limit, projected past it.
+    const outgrows = outgrowingTable;
     expect(outgrows.length).toBeLessThanOrEqual(4000);
     expect(convert(outgrows, "code").length).toBeGreaterThan(4000);
-
     const fitting = createBlockTableHarness(tableCfg("code"), true);
     fitting.result.replyOptions.onReasoningStream?.({ text: tableMarkdown });
     expect(streamingInstances).toHaveLength(1);
-    // Reasoning is quoted before it reaches the card, so the fence carries the quote.
     await requireStreamingInstance(0).updated.promise;
     expect(streamingUpdateTexts(0).join("")).toContain("> ```");
-
     const outgrowing = createBlockTableHarness(tableCfg("code"), true);
     outgrowing.result.replyOptions.onReasoningStream?.({ text: outgrows });
     expect(streamingInstances).toHaveLength(2);
@@ -1026,15 +545,10 @@ describe("createFeishuReplyDispatcher table limits", () => {
     expect(reasoning).not.toContain("```");
   });
 
-  // The lifecycle records the reported content as what the reader received, so a fallback
-  // that sends the authored table has to report the authored table.
   it("reports the text it posted when the conversion gave way to the authored table", async () => {
     await useRealMarkdownChunker();
     resolveFeishuAccountMock.mockReturnValue({
-      accountId: "main",
-      appId: "app_id",
-      appSecret: "app_secret",
-      domain: "feishu",
+      ...createReplyAccount("auto", "off"),
       config: { renderMode: "raw", streaming: { mode: "off" } },
     });
     const rows = Array.from({ length: 40 }, (_entry, index) => `> | row${index} | d |`);
@@ -1045,23 +559,19 @@ describe("createFeishuReplyDispatcher table limits", () => {
       `> | wide | ${"w".repeat(220)} |`,
     ].join("\n");
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
-    // The case only means anything while the conversion is the thing that cannot be sent.
+    expect(convert(text, "code")).toContain("> ```");
     expect(convert(text, "code").length).toBeGreaterThan(4000);
-
     const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg("code") });
     const accepted = await options.deliver({ text }, { kind: "final" });
-
     const posts = sendMessageFeishuMock.mock.calls.map((call) => String(call[0]?.text ?? ""));
     expect(posts.join("")).toBe(text);
     expect(accepted?.content).toBe(text);
   });
 
-  // A presentation whose prose outgrows the card envelope, carrying a quoted table whose
-  // conversion no cut at this limit can close and reopen.
   function forcedPresentationFallback() {
     const runtimeText = getFeishuRuntimeMock().channel.text;
     runtimeText.resolveTextChunkLimit.mockReturnValue(100);
-    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "off", "feishu"));
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "off"));
     const prose = Array.from(
       { length: 1000 },
       (_entry, index) => `Line ${index} of the release report.`,
@@ -1093,21 +603,12 @@ describe("createFeishuReplyDispatcher table limits", () => {
     };
   }
 
-  // The refused card leaves the presentation to a post, and the prose that post has to be
-  // able to send is the presentation's own. Its blocks are projected before the shared
-  // renderer sees them, so the authored form recorded for the cut has to come from the
-  // authored presentation rather than from that projection, which already carries fences.
-  it("posts the whole presentation when a refused card forces an unconvertible fallback", async () => {
+  it("posts and reports the whole presentation when a refused card forces an unconvertible fallback", async () => {
     await useRealMarkdownChunker();
     const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
     const fallback = forcedPresentationFallback();
-    // The case only means anything while the conversion carries quoted markers, which a cut
-    // at this limit can neither close nor reopen.
     expect(convert(fallback.quotedTable, "code")).toContain("> ```");
-
-    await fallback.deliver();
-
-    // Guard the fixture: the envelope refused the card, so the post owns the whole message.
+    const delivery = await fallback.deliver();
     expect(sendCardFeishuMock).not.toHaveBeenCalled();
     const posted = sendMessageFeishuMock.mock.calls
       .map((call) => String(call[0]?.text ?? ""))
@@ -1115,32 +616,15 @@ describe("createFeishuReplyDispatcher table limits", () => {
     expect(posted).toContain(fallback.lastProseLine);
     expect(posted).toContain(fallback.quotedRow);
     expect(posted).not.toContain("```");
-  });
-
-  // The lifecycle records the reported content as what the reader received. A presentation
-  // fallback is delivered by the same chunker as any other post, so the content it reports
-  // is whatever that chunker accepted, not the converted text the branch asked for.
-  it("reports the presentation prose a forced fallback posted", async () => {
-    await useRealMarkdownChunker();
-    const fallback = forcedPresentationFallback();
-
-    const delivery = await fallback.deliver();
-
-    expect(sendCardFeishuMock).not.toHaveBeenCalled();
-    const posted = sendMessageFeishuMock.mock.calls
-      .map((call) => String(call[0]?.text ?? ""))
-      .join("");
-    expect(posted).toContain(fallback.quotedRow);
     expect(delivery?.content).toContain(fallback.quotedRow);
     expect(delivery?.content).toContain(fallback.lastProseLine);
     expect(delivery?.content).not.toContain("```");
   });
 
   it("keeps a quoted off presentation table literal", async () => {
-    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "off", "feishu"));
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("auto", "off"));
     const quoted = "> | Name | Role |\n> | --- | --- |\n> | Ada | Lead |";
     const { options } = createDispatcherHarness({ accountId: "main", cfg: tableCfg("off") });
-
     await options.deliver(
       { presentation: { blocks: [{ type: "text", text: quoted }] } },
       { kind: "final" },
@@ -1150,5 +634,99 @@ describe("createFeishuReplyDispatcher table limits", () => {
     expect(presentationCardMarkdown()).toEqual([
       "&gt; | Name | Role |\n&gt; | &#45;-- | --- |\n&gt; | Ada | Lead |",
     ]);
+  });
+
+  const half = [
+    "| name | detail |",
+    "| --- | --- |",
+    ...Array.from({ length: 20 }, (_entry, index) => `| row${index} | d |`),
+    `| wide | ${"w".repeat(100)} |`,
+  ].join("\n");
+
+  it.each(["answer", "reasoning"] as const)(
+    "includes a later model wait in the projected %s preview budget",
+    async (part) => {
+      const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
+      resolveFeishuAccountMock.mockReturnValue(createReplyAccount("card", "partial"));
+      const table = half;
+      const wait = "Waiting for the local model to respond";
+      expect(convert(table, "code").length + wait.length * 50).toBeGreaterThan(4000);
+      expect(table.length * 2 + wait.length * 50).toBeLessThan(4000);
+      const { result, options } = createDispatcherHarness({
+        cfg: tableCfg("code"),
+        allowReasoningPreview: true,
+      });
+      await options.onReplyStart?.();
+      if (part === "answer") {
+        result.replyOptions.onPartialReply?.({ text: table });
+      } else {
+        result.replyOptions.onReasoningStream?.({ text: table });
+      }
+      await result.replyOptions.onItemEvent?.({
+        itemId: "model-wait",
+        kind: "model-wait",
+        phase: "update",
+        progressText: wait.repeat(50),
+        suppressDurableProgress: true,
+      });
+      await result.replyOptions.onItemEvent?.({
+        itemId: "model-wait",
+        kind: "model-wait",
+        phase: "end",
+        suppressDurableProgress: true,
+      });
+      await options.onIdle?.();
+      const updates = streamingUpdateTexts();
+      expect(updates.some((text) => text.includes("```"))).toBe(true);
+      const waiting = updates.find((text) => text.includes(wait));
+      expect(waiting).toBeDefined();
+      expect(updates.filter((text) => text.length > 4000)).toEqual([]);
+      expect(waiting).not.toContain("```");
+      if (part === "reasoning") {
+        expect(waiting).toContain("| wide |");
+      }
+      expect(updates.at(-1)).toContain("```");
+      expect(updates.at(-1)).not.toContain(wait);
+      expect(requireStreamingInstance(0).closeWithResult.mock.calls[0]?.[0]).not.toContain(wait);
+    },
+  );
+
+  it("stands down for every plain partial that would push projected reasoning past the limit", async () => {
+    const convert = getFeishuRuntimeMock().channel.text.convertMarkdownTables;
+    expect(convert(half, "code").length + 1_800).toBeGreaterThan(4_000);
+    expect(half.length * 2 + 3_000).toBeLessThanOrEqual(4_000);
+    const { result, options } = createBlockTableHarness(tableCfg("code"), true);
+    result.replyOptions.onReasoningStream?.({ text: half });
+    expect(streamingInstances).toHaveLength(1);
+    for (const length of [600, 1_200, 1_800, 2_400, 3_000]) {
+      result.replyOptions.onPartialReply?.({ text: "p".repeat(length) });
+    }
+    await options.onIdle?.();
+    const updates = streamingUpdateTexts(0);
+    expect(updates.some((text) => text.includes("p".repeat(600)))).toBe(true);
+    expect(updates.filter((text) => text.length > 4_000)).toEqual([]);
+  });
+
+  it("still previews an authored body that is past the limit", async () => {
+    const { result, options } = createBlockTableHarness(tableCfg("code"), true);
+    result.replyOptions.onReasoningStream?.({ text: "r".repeat(2_000) });
+    result.replyOptions.onPartialReply?.({ text: "a".repeat(2_500) });
+    await options.onIdle?.();
+    expect(streamingUpdateTexts(0).some((text) => text.length > 4_000)).toBe(true);
+  });
+
+  it("starts the next reply on the same dispatcher without the last one's authored reasoning", async () => {
+    const { result, options } = createBlockTableHarness(tableCfg("code"), true);
+    result.replyOptions.onReasoningStream?.({ text: half });
+    result.replyOptions.onPartialReply?.({ text: "p".repeat(600) });
+    await options.onIdle?.();
+    expect(streamingInstances).toHaveLength(1);
+    expect(requireStreamingInstance(0).closeWithResult).toHaveBeenCalledTimes(1);
+    result.replyOptions.onPartialReply?.({ text: "a".repeat(4_500) });
+    await options.onIdle?.();
+    expect(streamingInstances).toHaveLength(2);
+    expect(requireStreamingInstance(1).closeWithResult).toHaveBeenCalledTimes(1);
+    expect(requireStreamingInstance(1).discard).not.toHaveBeenCalled();
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
   });
 });

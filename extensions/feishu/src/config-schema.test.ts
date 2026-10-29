@@ -20,46 +20,19 @@ function expectSchemaIssue(value: unknown, issuePath: string) {
 }
 
 describe.each(["root", "account"] as const)("Feishu markdown tables at %s scope", (scope) => {
-  it.each(["off", "bullets", "code", "block"])("accepts the shared %s table mode", (tables) => {
-    const entry = { markdown: { tables } };
-    const value = scope === "root" ? entry : { accounts: { work: entry } };
-    const parsed = FeishuConfigSchema.safeParse(value);
-    expect(parsed.success).toBe(true);
-    if (parsed.success) {
-      expect(parsed.data).toMatchObject(value);
-    }
-    expect(
-      validateJsonSchemaValue({
-        schema: FeishuChannelConfigSchema.schema,
-        cacheKey: "feishu-markdown-tables-test",
-        value,
-        applyDefaults: true,
-      }).ok,
-    ).toBe(true);
-  });
-
-  it("rejects an invalid table mode", () => {
-    const entry = { markdown: { tables: "ascii" } };
-    const value = scope === "root" ? entry : { accounts: { work: entry } };
-    expect(FeishuConfigSchema.safeParse(value).success).toBe(false);
-    expect(
-      validateJsonSchemaValue({
-        schema: FeishuChannelConfigSchema.schema,
-        cacheKey: "feishu-markdown-tables-test",
-        value,
-        applyDefaults: true,
-      }).ok,
-    ).toBe(false);
-  });
-
   it.each([
-    { markdown: { mode: "escape" } },
-    { markdown: { tableMode: "ascii" } },
-    { markdown: { mode: "escape", tableMode: "ascii", tables: "off" } },
-  ])("keeps accepting the deprecated local markdown keys %j", (entry) => {
+    ...["off", "bullets", "code", "block"].map((tables) => ({
+      entry: { markdown: { tables } },
+      ok: true,
+    })),
+    { entry: { markdown: { tables: "ascii" } }, ok: false },
+    { entry: { markdown: { mode: "escape" } }, ok: true },
+    { entry: { markdown: { tableMode: "ascii" } }, ok: true },
+    { entry: { markdown: { mode: "escape", tableMode: "ascii", tables: "off" } }, ok: true },
+  ])("validates $entry (accepted: $ok)", ({ entry, ok }) => {
     const value = scope === "root" ? entry : { accounts: { work: entry } };
     const parsed = FeishuConfigSchema.safeParse(value);
-    expect(parsed.success).toBe(true);
+    expect(parsed.success).toBe(ok);
     if (parsed.success) {
       expect(parsed.data).toMatchObject(value);
     }
@@ -70,7 +43,7 @@ describe.each(["root", "account"] as const)("Feishu markdown tables at %s scope"
         value,
         applyDefaults: true,
       }).ok,
-    ).toBe(true);
+    ).toBe(ok);
   });
 });
 

@@ -26,53 +26,31 @@ describe("materializeFeishuPostMarkdownSoftBreaks", () => {
 describe("chunkedFencesBalance", () => {
   const table = "| a | b |\n| --- | --- |\n| 1 | 2 |";
 
-  it("reads a quoted marker past the quote's own four columns as indented code", () => {
-    // Five spaces after the marker: one of them belongs to the marker, and the four that
-    // remain make the rest indented code, so the line opens nothing and the table converts.
-    const converted = convertMarkdownTables(`> note:\n>     \`\`\`\n>\n> end.\n\n${table}`, "code");
-
-    expect(chunkedFencesBalance(converted, 4_000, "length")).toBe(true);
-  });
-
-  it("reads four spaces before a quote marker as the indented code they already are", () => {
-    // The four spaces settle the line before the marker is reached, so the marker is content
-    // and opens nothing, which leaves the generated table fences the only ones to balance.
-    const converted = convertMarkdownTables(`    > \`\`\`\n\n${table}`, "code");
-
-    expect(chunkedFencesBalance(converted, 4_000, "length")).toBe(true);
-  });
-
-  it("reads a quoted marker at three columns of content as the opener it is", () => {
-    // Four spaces, one of them the marker's own, leave three, which still opens a block.
-    const converted = convertMarkdownTables(`> note:\n>    \`\`\`\n>\n> end.\n\n${table}`, "code");
-
-    expect(chunkedFencesBalance(converted, 4_000, "length")).toBe(false);
-  });
-
-  it("measures a closer's indentation the way an opener's is measured", () => {
-    // Four spaces make the rest of a line indented code wherever the block it sits in
-    // begins, so the marker inside the top-level fence is content and the fence closes on
-    // the last line rather than the indented one. The item's closer carries the four
-    // spaces its content starts at, which is no indentation of its own, so it still
-    // closes the fence its marker line opened.
-    const authored = [
-      "  - ```",
-      "    sample",
-      "    ```",
-      "",
-      "```",
-      "sample",
-      "    ```",
-      "```",
-    ].join("\n");
+  it.each([
+    {
+      name: "a quoted marker past four columns",
+      authored: "> note:\n>     ```\n>\n> end.",
+      balanced: true,
+    },
+    { name: "four spaces before a quote marker", authored: "    > ```", balanced: true },
+    {
+      name: "a quoted marker at three columns",
+      authored: "> note:\n>    ```\n>\n> end.",
+      balanced: false,
+    },
+    {
+      name: "a closer measured like its opener",
+      authored: ["  - ```", "    sample", "    ```", "", "```", "sample", "    ```", "```"].join(
+        "\n",
+      ),
+      balanced: true,
+    },
+  ])("reads $name before a converted table (balanced: $balanced)", ({ authored, balanced }) => {
     const converted = convertMarkdownTables(`${authored}\n\n${table}`, "code");
-
-    expect(chunkedFencesBalance(converted, 4_000, "length")).toBe(true);
+    expect(chunkedFencesBalance(converted, 4_000, "length")).toBe(balanced);
   });
 });
 
-// micromark emits one fence sequence for an opener and one for a closer, and no default handler
-// reads them, so counting them per code node says whether the parser closed that block.
 const fenceSequences = new Map<object, number>();
 const fenceObserver = {
   exit: {
@@ -85,7 +63,6 @@ const fenceObserver = {
   },
 };
 
-/** Whether the production parser closes every fenced block it opens in this text. */
 function parserClosesEveryFence(text: string): boolean {
   fenceSequences.clear();
   fromMarkdown(text, {
@@ -95,7 +72,6 @@ function parserClosesEveryFence(text: string): boolean {
   return [...fenceSequences.values()].every((count) => count === 2);
 }
 
-/** Whether the production parser reads this text as exactly one code block that was closed. */
 function parserYieldsOneClosedBlock(text: string): boolean {
   fenceSequences.clear();
   fromMarkdown(text, {
@@ -110,10 +86,6 @@ function parserYieldsOneClosedBlock(text: string): boolean {
   return codeNodes === 1 && sequences.length === 1 && sequences[0] === 2;
 }
 
-// The guard has to say what the parser says about a closer, because a chunk the guard passes is
-// delivered as it stands. Every row names the verdict the parser gives, and the guard is held to
-// the parser and to the row. The guard asks the parser itself, so the row is what pins the verdict
-// by hand.
 describe("fence guard against the Markdown parser", () => {
   const F = "```";
   const cases = [
@@ -224,7 +196,6 @@ describe("fence guard against the Markdown parser", () => {
       lines: [`> ${F}`, "> x", "y", `> ${F}`],
       closed: false,
     },
-    // A list paragraph that came before the fence is part of what closes it.
     {
       name: "a quote inside a list item that is already open",
       lines: ["- item", `  > ${F}`, "    > x", `  > ${F}`],
@@ -255,7 +226,6 @@ describe("fence guard against the Markdown parser", () => {
       lines: ["1. item", `   > ${F}`, "   > x", `> ${F}`],
       closed: false,
     },
-    // Only spaces and tabs may follow a closing marker.
     {
       name: "a no-break space after the closer",
       lines: [`- ${F}`, "  x", `   ${F}\u00a0`],
@@ -304,9 +274,6 @@ describe("fence guard against the Markdown parser", () => {
     }
   });
 
-  // A limit small enough to cut the block. The chunker closes and reopens a fence it can see, so
-  // a top-level one balances in every chunk, and it cannot see one behind a quote or a list
-  // marker, so those leave a chunk with an opener and no closer.
   it.each([
     { name: "a top-level fence", prefix: "", cut: true, balanced: true },
     { name: "a quoted fence", prefix: "> ", cut: true, balanced: false },
@@ -327,14 +294,12 @@ describe("fence guard against the Markdown parser", () => {
         const chunks = chunkMarkdownTextWithMode(text, limit, mode);
         expect(chunks.length > 1).toBe(cut);
         expect(chunkedFencesBalance(text, limit, mode)).toBe(balanced);
-        // The parser agrees on each chunk the guard saw.
         expect(chunks.every((chunk) => parserClosesEveryFence(chunk))).toBe(balanced);
       }
     },
   );
 
   it("converts a table after a nested block the guard used to refuse", () => {
-    // The first block is properly closed, so the generated fence is the only one left to balance.
     const authored = `   >    > - ${F}\n   >    >   x\n> >         ${F}\n   >    >   y\n   >    >   ${F}`;
     const converted = convertMarkdownTables(
       `${authored}\n\n| a | b |\n| --- | --- |\n| 1 | 2 |`,

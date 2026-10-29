@@ -1,4 +1,3 @@
-// Feishu tests cover presentation card table modes on the action surface.
 import {
   convertMarkdownTables,
   type MarkdownTableMode,
@@ -14,109 +13,42 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import type { OpenClawConfig } from "../runtime-api.js";
 import { feishuPlugin } from "./channel.js";
 
-const probeFeishuMock = vi.hoisted(() => vi.fn());
-const createFeishuClientMock = vi.hoisted(() => vi.fn());
-const addReactionFeishuMock = vi.hoisted(() => vi.fn());
-const listReactionsFeishuMock = vi.hoisted(() => vi.fn());
-const removeReactionFeishuMock = vi.hoisted(() => vi.fn());
-const sendCardFeishuMock = vi.hoisted(() => vi.fn());
-const sendMessageFeishuMock = vi.hoisted(() => vi.fn());
-const sendStickerFeishuMock = vi.hoisted(() => vi.fn());
-const getMessageFeishuMock = vi.hoisted(() => vi.fn());
-const editMessageFeishuMock = vi.hoisted(() => vi.fn());
-const createPinFeishuMock = vi.hoisted(() => vi.fn());
-const listPinsFeishuMock = vi.hoisted(() => vi.fn());
-const removePinFeishuMock = vi.hoisted(() => vi.fn());
-const getChatInfoMock = vi.hoisted(() => vi.fn());
-const getChatMembersMock = vi.hoisted(() => vi.fn());
-const buildFeishuDirectChatMembersMock = vi.hoisted(() =>
-  vi.fn(
-    (authorization: { chatId: string; memberId: string; memberIdType: "open_id" | "user_id" }) => ({
-      chat_id: authorization.chatId,
-      has_more: false,
-      page_token: undefined,
-      members: [
-        {
-          member_id: authorization.memberId,
-          name: undefined,
-          tenant_key: undefined,
-          member_id_type: authorization.memberIdType,
-        },
-      ],
-    }),
-  ),
-);
-const assertFeishuChatMemberMock = vi.hoisted(() => vi.fn());
-const getFeishuMemberInfoMock = vi.hoisted(() => vi.fn());
-const listFeishuDirectoryPeersLiveMock = vi.hoisted(() => vi.fn());
-const listFeishuDirectoryGroupsLiveMock = vi.hoisted(() => vi.fn());
-const feishuOutboundSendTextMock = vi.hoisted(() => vi.fn());
-const feishuOutboundSendMediaMock = vi.hoisted(() => vi.fn());
-const feishuOutboundSendPayloadMock = vi.hoisted(() => vi.fn());
+const mocks = vi.hoisted(() => ({
+  createFeishuClient: vi.fn(),
+  getChatInfo: vi.fn(),
+  sendCardFeishu: vi.fn(),
+  sendMessageFeishu: vi.fn(),
+  sendPayload: vi.fn(),
+}));
 
 vi.mock("./probe.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./probe.js")>()),
-  probeFeishu: probeFeishuMock,
+  probeFeishu: vi.fn(),
 }));
 
 vi.mock("./client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./client.js")>()),
-  createFeishuClient: createFeishuClientMock,
+  createFeishuClient: mocks.createFeishuClient,
 }));
 
 vi.mock("./channel.runtime.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./channel.runtime.js")>()),
   feishuChannelRuntime: {
-    addReactionFeishu: addReactionFeishuMock,
-    createPinFeishu: createPinFeishuMock,
-    editMessageFeishu: editMessageFeishuMock,
-    getChatInfo: getChatInfoMock,
-    getChatMembers: getChatMembersMock,
-    buildFeishuDirectChatMembers: buildFeishuDirectChatMembersMock,
-    assertFeishuChatMember: assertFeishuChatMemberMock,
-    getFeishuMemberInfo: getFeishuMemberInfoMock,
-    getMessageFeishu: getMessageFeishuMock,
-    listFeishuDirectoryGroupsLive: listFeishuDirectoryGroupsLiveMock,
-    listFeishuDirectoryPeersLive: listFeishuDirectoryPeersLiveMock,
-    listPinsFeishu: listPinsFeishuMock,
-    listReactionsFeishu: listReactionsFeishuMock,
-    probeFeishu: probeFeishuMock,
-    removePinFeishu: removePinFeishuMock,
-    removeReactionFeishu: removeReactionFeishuMock,
-    sendCardFeishu: sendCardFeishuMock,
-    sendMessageFeishu: sendMessageFeishuMock,
-    sendStickerFeishu: sendStickerFeishuMock,
-    feishuOutbound: {
-      sendText: feishuOutboundSendTextMock,
-      sendMedia: feishuOutboundSendMediaMock,
-      sendPayload: feishuOutboundSendPayloadMock,
-    },
+    getChatInfo: mocks.getChatInfo,
+    sendCardFeishu: mocks.sendCardFeishu,
+    sendMessageFeishu: mocks.sendMessageFeishu,
+    feishuOutbound: { sendText: vi.fn(), sendMedia: vi.fn(), sendPayload: mocks.sendPayload },
   },
 }));
 
 const requireRecord = createRequireRecord("record", "expected-label-capitalized");
 
-function requireArray(value: unknown, label: string): unknown[] {
-  if (!Array.isArray(value)) {
-    throw new Error(`Expected ${label}`);
-  }
-  return value;
-}
-
-function mockCallArg(mock: unknown, callIndex: number, argIndex: number, label: string) {
-  const calls = (mock as { mock?: { calls?: unknown[][] } }).mock?.calls;
-  if (!Array.isArray(calls)) {
-    throw new Error(`Expected ${label} mock calls`);
-  }
-  const call = calls[callIndex];
+function firstCallArg(mock: { mock: { calls: unknown[][] } }, label: string) {
+  const call = mock.mock.calls[0];
   if (!call) {
-    throw new Error(`Expected ${label} call ${callIndex + 1}`);
+    throw new Error(`Expected ${label} call 1`);
   }
-  return call[argIndex];
-}
-
-function resultDetails(result: unknown) {
-  return requireRecord(requireRecord(result, "action result").details, "action result details");
+  return call[0];
 }
 
 afterAll(() => {
@@ -133,9 +65,7 @@ describe("feishuPlugin actions", () => {
         enabled: true,
         appId: "cli_main",
         appSecret: "secret_main",
-        actions: {
-          reactions: true,
-        },
+        actions: { reactions: true },
         dmPolicy: "open",
         allowFrom: ["*"],
         groupPolicy: "open",
@@ -143,15 +73,13 @@ describe("feishuPlugin actions", () => {
     },
   } as OpenClawConfig;
 
-  // Table modes read the channel default from the plugin meta, and the harness
-  // does not load the runtime setup, so register the real plugin for every test.
   beforeEach(() => {
     vi.clearAllMocks();
     setActivePluginRegistry(
       createTestRegistry([{ pluginId: "feishu", source: "test", plugin: feishuPlugin }]),
     );
-    createFeishuClientMock.mockReturnValue({ tag: "client" });
-    getChatInfoMock.mockResolvedValue({
+    mocks.createFeishuClient.mockReturnValue({ tag: "client" });
+    mocks.getChatInfo.mockResolvedValue({
       chat_id: "oc_group_1",
       chat_mode: "group",
       chat_type: "private",
@@ -165,7 +93,6 @@ describe("feishuPlugin actions", () => {
 
   describe("presentation card markdown table modes", () => {
     const tableMarkdown = "| Name | Role |\n| --- | --- |\n| Ada | Lead |";
-
     function tableModeCfg(
       selection: "channel" | "named" | "defaultAccount",
       tables: MarkdownTableMode,
@@ -191,13 +118,13 @@ describe("feishuPlugin actions", () => {
         },
       } as OpenClawConfig;
     }
-
-    async function cardMarkdownForPresentationTable(params: {
+    async function cardMarkdownForPresentation(params: {
       cfg: OpenClawConfig;
       accountId?: string;
       action?: "send" | "thread-reply";
+      blocks?: unknown[];
     }): Promise<string[]> {
-      sendCardFeishuMock.mockResolvedValueOnce({ messageId: "om_card", chatId: "oc_group_1" });
+      mocks.sendCardFeishu.mockResolvedValueOnce({ messageId: "om_card", chatId: "oc_group_1" });
       const action = params.action ?? "send";
       await feishuPlugin.actions?.handleAction?.({
         action,
@@ -205,7 +132,7 @@ describe("feishuPlugin actions", () => {
           to: "chat:oc_group_1",
           ...(action === "thread-reply" ? { messageId: "om_root" } : {}),
           presentation: {
-            blocks: [
+            blocks: params.blocks ?? [
               { type: "text", text: tableMarkdown },
               { type: "context", text: tableMarkdown },
             ],
@@ -215,126 +142,88 @@ describe("feishuPlugin actions", () => {
         accountId: params.accountId,
         toolContext: {},
       } as never);
-
       const sendCardArgs = requireRecord(
-        mockCallArg(sendCardFeishuMock, 0, 0, "sendCardFeishu"),
+        firstCallArg(mocks.sendCardFeishu, "sendCardFeishu"),
         "send card args",
       );
-      const card = requireRecord(sendCardArgs.card, "card");
-      const body = requireRecord(card.body, "card body");
-      return requireArray(body.elements, "card elements").map((element) =>
-        String(requireRecord(element, "card element").content),
-      );
+      const body = requireRecord(requireRecord(sendCardArgs.card, "card").body, "card body");
+      const elements = body.elements;
+      if (!Array.isArray(elements)) {
+        throw new Error("Expected card elements");
+      }
+      return elements.map((element) => String(requireRecord(element, "card element").content));
     }
 
-    // The action builds its own presentation card, so the mode has to reach that
-    // build the same way it reaches the presentation fallback through sendPayload.
-    it.each(
-      (["bullets", "code"] as const).flatMap((tables) =>
+    it.each([
+      ...(["bullets", "code"] as const).flatMap((tables) =>
         (["channel", "named", "defaultAccount"] as const).map((selection) => ({
           tables,
           selection,
+          action: "send" as const,
         })),
       ),
-    )(
-      "converts a $selection $tables table on a sent presentation card",
-      async ({ tables, selection }) => {
-        const converted = convertMarkdownTables(tableMarkdown, tables);
-
-        const markdown = await cardMarkdownForPresentationTable({
+      {
+        tables: "bullets" as const,
+        selection: "channel" as const,
+        action: "thread-reply" as const,
+      },
+      { tables: "off" as const, selection: "channel" as const, action: "send" as const },
+    ])(
+      "renders a $selection $tables table on a $action presentation card",
+      async ({ tables, selection, action }) => {
+        const converted =
+          tables === "off"
+            ? "| Name | Role |\n| &#45;-- | --- |\n| Ada | Lead |"
+            : convertMarkdownTables(tableMarkdown, tables);
+        const markdown = await cardMarkdownForPresentation({
           cfg: tableModeCfg(selection, tables),
           accountId: selection === "named" ? "work" : undefined,
+          action,
         });
-
-        // `code` converts the table to a fence, which cannot survive the color tag.
         expect(markdown).toEqual([
           converted,
           tables === "code" ? converted : `<font color='grey'>${converted}</font>`,
         ]);
-        expect(markdown.join("\n")).not.toContain("| --- |");
-        expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+        if (tables !== "off") {
+          expect(markdown.join("\n")).not.toContain("| --- |");
+        }
+        expect(mocks.sendMessageFeishu).not.toHaveBeenCalled();
       },
     );
 
-    it("converts the table a thread-reply presentation card carries", async () => {
-      const converted = convertMarkdownTables(tableMarkdown, "bullets");
-
-      const markdown = await cardMarkdownForPresentationTable({
-        cfg: tableModeCfg("channel", "bullets"),
-        action: "thread-reply",
-      });
-
-      expect(markdown).toEqual([converted, `<font color='grey'>${converted}</font>`]);
-      expect(markdown.join("\n")).not.toContain("| --- |");
-    });
-
-    it("keeps an off presentation table literal instead of parsing it natively", async () => {
-      const markdown = await cardMarkdownForPresentationTable({
-        cfg: tableModeCfg("channel", "off"),
-      });
-
-      const literal = "| Name | Role |\n| &#45;-- | --- |\n| Ada | Lead |";
-      expect(markdown).toEqual([literal, `<font color='grey'>${literal}</font>`]);
-    });
-
     it("keeps a quoted off presentation table literal", async () => {
-      sendCardFeishuMock.mockResolvedValueOnce({ messageId: "om_card", chatId: "oc_group_1" });
-      const quoted = "> | Name | Role |\n> | --- | --- |\n> | Ada | Lead |";
-      await feishuPlugin.actions?.handleAction?.({
-        action: "send",
-        params: {
-          to: "chat:oc_group_1",
-          presentation: { blocks: [{ type: "text", text: quoted }] },
-        },
+      const markdown = await cardMarkdownForPresentation({
         cfg: tableModeCfg("channel", "off"),
-        accountId: undefined,
-        toolContext: {},
-      } as never);
-
-      const sendCardArgs = requireRecord(
-        mockCallArg(sendCardFeishuMock, 0, 0, "sendCardFeishu"),
-        "send card args",
-      );
-      const body = requireRecord(requireRecord(sendCardArgs.card, "card").body, "card body");
-      const markdown = requireArray(body.elements, "card elements").map((element) =>
-        String(requireRecord(element, "card element").content),
-      );
+        blocks: [{ type: "text", text: "> | Name | Role |\n> | --- | --- |\n> | Ada | Lead |" }],
+      });
       expect(markdown).toEqual([
         "&gt; | Name | Role |\n&gt; | &#45;-- | --- |\n&gt; | Ada | Lead |",
       ]);
     });
   });
 
-  // main keeps this in channel.test.ts. The card refusal reads the table mode, and that
-  // lookup reads the registered plugin, which this file registers.
   it("falls back when presentation text exceeds the card table limit", async () => {
-    feishuOutboundSendPayloadMock.mockResolvedValueOnce({
-      messageId: "om_sent",
-      chatId: "oc_group_1",
-    });
+    mocks.sendPayload.mockResolvedValueOnce({ messageId: "om_sent", chatId: "oc_group_1" });
     const sixTables = Array.from(
       { length: 6 },
       (_, i) => `| a${i} | b${i} |\n| - | - |\n| 1 | 2 |`,
     ).join("\n\n");
+    const result = await feishuPlugin.actions?.handleAction?.({
+      channel: "feishu",
+      cfg,
+      action: "send",
+      params: {
+        to: "chat:oc_group_1",
+        message: sixTables,
+        presentation: { title: "Status", blocks: [{ type: "text", text: "Build completed" }] },
+      },
+    });
     expect(
-      resultDetails(
-        await feishuPlugin.actions?.handleAction?.({
-          channel: "feishu",
-          cfg,
-          action: "send",
-          params: {
-            to: "chat:oc_group_1",
-            message: sixTables,
-            presentation: { title: "Status", blocks: [{ type: "text", text: "Build completed" }] },
-          },
-        }),
-      ),
+      requireRecord(requireRecord(result, "action result").details, "action result details"),
     ).toMatchObject({ ok: true, messageId: "om_sent" });
-    expect(sendCardFeishuMock).not.toHaveBeenCalled();
-    expect(feishuOutboundSendPayloadMock).toHaveBeenCalledOnce();
-    expect(
-      mockCallArg(feishuOutboundSendPayloadMock, 0, 0, "feishuOutbound.sendPayload"),
-    ).toMatchObject({
+    expect(mocks.sendCardFeishu).not.toHaveBeenCalled();
+    expect(mocks.sendPayload).toHaveBeenCalledOnce();
+    expect(firstCallArg(mocks.sendPayload, "feishuOutbound.sendPayload")).toMatchObject({
       to: "chat:oc_group_1",
       text: sixTables,
     });

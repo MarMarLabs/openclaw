@@ -54,14 +54,8 @@ describe("Feishu public outbound presentation hooks", () => {
   it("advertises the formatted sender alongside the per-message one", async () => {
     const receipts = [{ channel: "feishu", messageId: "om_first" }];
     sendFormattedText.mockResolvedValueOnce(receipts);
-
-    // Core reads this entry from the registered surface and keeps cutting the reply
-    // itself while it is absent, so the adapter implementing it is not enough. Both
-    // entries stay advertised, because the per-message one still answers a caller
-    // that hands over one unit at a time.
     expect(typeof feishuPlugin.outbound?.sendFormattedText).toBe("function");
     expect(typeof feishuPlugin.outbound?.sendText).toBe("function");
-
     const formattedContext = {
       cfg: {},
       to: "chat:oc_group",

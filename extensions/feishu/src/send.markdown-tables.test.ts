@@ -1,4 +1,3 @@
-// Feishu tests cover per-account markdown table mode on the send and edit paths.
 import {
   createEmptyPluginRegistry,
   createTestRegistry,
@@ -21,8 +20,6 @@ let sendMessageFeishu: typeof import("./send.js").sendMessageFeishu;
 
 const tableMarkdown = "| Name | Role |\n| --- | --- |\n| Ada | Lead |";
 const tableBullets = "**Ada**  \n• Role: Lead";
-// Root credentials make the implicit default account configured, so the real
-// account resolver runs and defaultAccount selection is exercised as shipped.
 const cfg: ClawdbotConfig = {
   channels: {
     feishu: {
@@ -55,8 +52,6 @@ describe("feishu markdown table mode per account", () => {
   const update = vi.fn();
 
   beforeAll(async () => {
-    // The shared resolver reads config only for a registered channel id, and this
-    // harness does not load the runtime setup, so register a minimal feishu plugin.
     setActivePluginRegistry(
       createTestRegistry([
         { pluginId: "feishu", source: "test", plugin: { id: "feishu", meta: { id: "feishu" } } },
@@ -82,7 +77,6 @@ describe("feishu markdown table mode per account", () => {
   it("sends the named account's table mode and keeps the channel mode without an account", async () => {
     await sendMessageFeishu({ cfg, to: "oc_send", text: tableMarkdown, accountId: "work" });
     await sendMessageFeishu({ cfg, to: "oc_send", text: tableMarkdown });
-
     expect(postText(create.mock.calls[0]?.[0])).toBe(tableMarkdown);
     expect(postText(create.mock.calls[1]?.[0])).toBe(tableBullets);
   });
@@ -90,13 +84,10 @@ describe("feishu markdown table mode per account", () => {
   it("edits rich posts with the named account's table mode", async () => {
     await editMessageFeishu({ cfg, messageId: "om_edit", text: tableMarkdown, accountId: "work" });
     await editMessageFeishu({ cfg, messageId: "om_edit", text: tableMarkdown });
-
     expect(postText(update.mock.calls[0]?.[0])).toBe(tableMarkdown);
     expect(postText(update.mock.calls[1]?.[0])).toBe(tableBullets);
   });
 
-  // An edit is one message and cannot fan out, so a conversion that pads the text past
-  // the 30 KB envelope would fail the edit outright rather than deliver less of it.
   it("edits with the authored table when the conversion leaves the post envelope", async () => {
     const codeCfg: ClawdbotConfig = {
       channels: {
@@ -115,8 +106,6 @@ describe("feishu markdown table mode per account", () => {
       ...rows,
       `| wide | ${"w".repeat(600)} |`,
     ].join("\n");
-    // The case only means anything while the authored edit fits the envelope and every
-    // cell padded out to the widest one does not.
     expect(Buffer.byteLength(padded, "utf8")).toBeLessThan(30 * 1024);
     expect(Buffer.byteLength(convertMarkdownTables(padded, "code"), "utf8")).toBeGreaterThan(
       30 * 1024,
@@ -128,7 +117,6 @@ describe("feishu markdown table mode per account", () => {
       text: padded,
       accountId: "work",
     });
-    // A table the conversion keeps inside the envelope still arrives converted.
     await editMessageFeishu({
       cfg: codeCfg,
       messageId: "om_edit",
@@ -143,7 +131,6 @@ describe("feishu markdown table mode per account", () => {
   it("follows defaultAccount when the account id is omitted", async () => {
     await sendMessageFeishu({ cfg: defaultAccountCfg, to: "oc_send", text: tableMarkdown });
     await editMessageFeishu({ cfg: defaultAccountCfg, messageId: "om_edit", text: tableMarkdown });
-
     expect(postText(create.mock.calls[0]?.[0])).toBe(tableBullets);
     expect(postText(update.mock.calls[0]?.[0])).toBe(tableBullets);
   });
