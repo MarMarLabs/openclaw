@@ -50,10 +50,9 @@ import {
   beginPluginStatePublication,
   recordPluginStateReadDependency,
   withPluginStatePublication,
-  type PluginStatePublicationEffect,
   type PluginStatePublicationScope,
 } from "./plugin-state-publication.js";
-import { preparePluginStateReceiptInput } from "./plugin-state-receipt-input.js";
+import { preparePluginStateReceiptInput, publicationEffect } from "./plugin-state-receipt-input.js";
 import { wrapPluginStateError } from "./plugin-state-store.database.js";
 import {
   assertPluginStateKey,
@@ -157,26 +156,6 @@ function prepareCommandOrder(
     default:
       return beginPluginStateMutation(coordinationKey, [command.input]);
   }
-}
-
-function publicationEffect(
-  command: PluginStateCommand,
-  scope: PluginStatePublicationScope | undefined,
-): PluginStatePublicationEffect | undefined {
-  if (command.type === "pluginState.observe") {
-    return Object.freeze({ kind: "unchanged" });
-  }
-  // Only exact-key CAS writes have a bounded set of possible values: the
-  // committed row on conflict/rollback, or this immutable serialized postimage.
-  if (command.type === "pluginState.compareUpdate" && scope?.key !== undefined) {
-    if (command.input.action === "keep") {
-      return Object.freeze({ kind: "unchanged" });
-    }
-    if (command.input.ttlMs === undefined) {
-      return Object.freeze({ kind: "postimage", valueJson: command.input.valueJson });
-    }
-  }
-  return undefined;
 }
 
 async function execute<Key extends keyof PluginStateWorkerOperations>(
