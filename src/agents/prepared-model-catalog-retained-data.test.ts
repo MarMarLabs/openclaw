@@ -37,8 +37,6 @@ it.each(["accessor", "proxy"])("samples a static %s catalog without executing it
       {
         pluginMetadataSnapshot: createPluginMetadataSnapshotFixture(),
         remoteCatalog: null,
-        inlineProviderModels: [],
-        configuredCatalogEntries: [],
         preparedStaticProviderCatalog,
       },
     ],
@@ -68,8 +66,6 @@ it("does not rewalk unchanged immutable remote catalogs and refreshes changed ro
   const generation = (remoteCatalog: typeof first) => ({
     pluginMetadataSnapshot: createPluginMetadataSnapshotFixture(),
     remoteCatalog,
-    inlineProviderModels: [],
-    configuredCatalogEntries: [],
   });
   const firstGeneration = generation(first);
   const secondGeneration = generation(second);
@@ -99,4 +95,42 @@ it("does not rewalk unchanged immutable remote catalogs and refreshes changed ro
   expect(measurePreparedCatalogRetainedData([mutableGeneration], undefined)).toContainEqual(
     expect.objectContaining({ structure: "catalog-remote", entries: 2, generations: 1 }),
   );
+});
+
+it("does not rewalk published metadata on idle samples and refreshes replacement roots", () => {
+  const first = createPluginMetadataSnapshotFixture({ plugins: [{ id: "first" }] });
+  const second = createPluginMetadataSnapshotFixture({
+    plugins: [{ id: "second" }, { id: "third" }],
+  });
+  const generation = (pluginMetadataSnapshot: typeof first) => ({
+    pluginMetadataSnapshot,
+    remoteCatalog: null,
+  });
+  const firstGeneration = generation(first);
+  const secondGeneration = generation(second);
+  const initial = measurePreparedCatalogRetainedData([firstGeneration], undefined);
+  using observation = vi.spyOn(Object, "getOwnPropertyDescriptor");
+  const metadataReads = () =>
+    observation.mock.calls.filter(([value]) => value === first || value === second).length;
+  for (let heartbeat = 0; heartbeat < 20; heartbeat++) {
+    expect(measurePreparedCatalogRetainedData([firstGeneration], undefined)).toEqual(initial);
+  }
+  expect(metadataReads()).toBe(0);
+  const combined = measurePreparedCatalogRetainedData(
+    [firstGeneration, secondGeneration],
+    undefined,
+  );
+  expect(metadataReads()).toBeGreaterThan(0);
+  expect(combined).toContainEqual(
+    expect.objectContaining({ structure: "catalog-metadata", entries: 2 }),
+  );
+  observation.mockClear();
+  const replaced = measurePreparedCatalogRetainedData([secondGeneration], undefined);
+  expect(metadataReads()).toBeGreaterThan(0);
+  expect(replaced).toContainEqual(
+    expect.objectContaining({ structure: "catalog-metadata", entries: 1 }),
+  );
+  expect(
+    replaced.find((row) => row.structure === "catalog-metadata")?.approximateBytes,
+  ).toBeGreaterThan(initial.find((row) => row.structure === "catalog-metadata")!.approximateBytes);
 });

@@ -54,7 +54,7 @@ const repoRoot = process.cwd();
 const bundledWrapperPath = path.join(repoRoot, ".tmp", `crabbox-wrapper-test-${process.pid}.mjs`);
 const realBundledWrapperPath = bundledWrapperPath.replace(".mjs", "-real.mjs");
 const bundledOutputPaths = new Set<string>();
-let realWrapperOutputPaths: string[];
+let bundledChunkPaths: string[];
 let bundledSetupPath: string;
 let preparedDependencyRoot: string | undefined;
 const fakeCrabboxBinDirs = new Map<string, string>();
@@ -834,7 +834,7 @@ async function runWrapperCleanupProof(
     async ({ checkoutRoot: producer, fixtureRoot, implementationPath, wrapperPath }) => {
       // Keep the real TSX entrypoint without transforming the compiled dependency bundle again.
       const compiledWrapperPath = implementationPath.replace(/\.mts$/u, ".compiled.mjs");
-      copyRealWrapper(compiledWrapperPath);
+      copyBundledScript(compiledWrapperPath);
       writeFileSync(
         implementationPath,
         `import ${JSON.stringify(pathToFileURL(compiledWrapperPath).href)};\n`,
@@ -1649,14 +1649,17 @@ function copyDependencyFingerprint(directory: string) {
   }
 }
 
-function copyRealWrapper(destination: string) {
-  for (const output of realWrapperOutputPaths) {
-    copyFileSync(
-      output,
-      output === realBundledWrapperPath
-        ? destination
-        : path.join(path.dirname(destination), path.basename(output)),
-    );
+function copyBundledScript(destination: string, entry = realBundledWrapperPath) {
+  // Compiled outputs stay immutable until afterAll; each fixture owns its directory entries.
+  for (const output of [entry, ...bundledChunkPaths]) {
+    const target =
+      output === entry ? destination : path.join(path.dirname(destination), path.basename(output));
+    try {
+      linkSync(output, target);
+    } catch {
+      // Temp directories can be on another volume or disallow hard links.
+      copyFileSync(output, target);
+    }
   }
 }
 
@@ -1767,24 +1770,15 @@ describe("scripts/crabbox-wrapper", () => {
     for (const output of outputs) {
       bundledOutputPaths.add(output);
     }
-    realWrapperOutputPaths = outputs.filter(
-      (output) => output !== setupOutput && output !== bundledWrapperPath,
+    bundledChunkPaths = outputs.filter(
+      (output) => ![setupOutput, bundledWrapperPath, realBundledWrapperPath].includes(output),
     );
     bundledSetupPath = path.join(
       makeTempDir(tempDirs, "openclaw-crabbox-setup-"),
       "openclaw/scripts/crabbox-setup.mjs",
     );
     mkdirSync(path.dirname(bundledSetupPath), { recursive: true });
-    for (const output of outputs) {
-      if (output !== realBundledWrapperPath && output !== bundledWrapperPath) {
-        copyFileSync(
-          output,
-          output === setupOutput
-            ? bundledSetupPath
-            : path.join(path.dirname(bundledSetupPath), path.basename(output)),
-        );
-      }
-    }
+    copyBundledScript(bundledSetupPath, setupOutput);
   });
 
   it("prepares the supported executable for later workflow steps", () => {
@@ -3028,7 +3022,7 @@ esac
       input: ["bun", "--version"],
       includes: [
         "openclaw_crabbox_bootstrap_macos_js",
-        "bun_version=1.4.3",
+        "bun_version=1.4.4",
         'bun_root="$tool_root/bun-v${bun_version}"',
         'npm install --global --prefix "$bun_root" --fetch-timeout=120000 --fetch-retries=2 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=15000 "bun@${bun_version}"',
         "bun --version >&2 || return 1",
@@ -3582,7 +3576,7 @@ esac
       name: "bootstraps Bun for AWS macOS script-stdin bun shebangs",
       input: ["#!/usr/bin/env bun", "console.log(Bun.version);"].join("\n"),
       includes: [
-        "bun_version=1.4.3",
+        "bun_version=1.4.4",
         'npm install --global --prefix "$bun_root" --fetch-timeout=120000 --fetch-retries=2 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=15000 "bun@${bun_version}"',
         "bun --version >&2 || return 1",
       ],
@@ -4188,7 +4182,7 @@ esac
       const sourceMode = lstatSync(path.join(producer, sourcePath)).mode;
       const wrapper = path.join(producer, ".tmp", "wrapper.mjs");
       mkdirSync(path.dirname(wrapper));
-      copyRealWrapper(wrapper);
+      copyBundledScript(wrapper);
       const preload = path.join(root, "write-failure.cjs");
       writeFileSync(
         preload,
@@ -4429,6 +4423,7 @@ process.on("exit", () => {
     ["aws", false, "unchanged"],
     ["blacksmith-testbox", true, "transport"],
     ["blacksmith-testbox", false, "transport"],
+    ["blacksmith-testbox", false, "prepared-partial"],
     ["blacksmith-testbox", false, "unchanged"],
     ["blacksmith-testbox", false, "unrelated-staging"],
     ["blacksmith-testbox", false, "captured-base"],
@@ -4628,7 +4623,7 @@ process.on("exit", () => {
       }
       const fixtureWrapper = path.join(producer, ".tmp", "crabbox-wrapper.mjs");
       mkdirSync(path.dirname(fixtureWrapper), { recursive: true });
-      copyRealWrapper(fixtureWrapper);
+      copyBundledScript(fixtureWrapper);
       const sourceCommand =
         provider === "blacksmith-testbox" || scenario === "arbitrary"
           ? "scripts/source-fixture.mjs"
@@ -5476,6 +5471,72 @@ require('node:module').syncBuiltinESMExports();`,
           : existsSync(path.join(producer, ".git", "shallow")),
       ).toEqual(shallowBefore ?? false);
 
+      if (scenario === "prepared-partial") {
+        const missingBlob = git(origin, ["rev-parse", `${base}:unchanged.bin`]);
+        const preparePartialReceiver = (receiver: string) => {
+          rmSync(receiver, { recursive: true, force: true });
+          git(root, [
+            "clone",
+            "-q",
+            "--filter=blob:none",
+            "--no-checkout",
+            `file://${origin}`,
+            receiver,
+          ]);
+          for (const entry of readdirSync(origin)) {
+            if (entry === ".git") {
+              continue;
+            }
+            cpSync(path.join(origin, entry), path.join(receiver, entry), {
+              recursive: true,
+              verbatimSymlinks: true,
+            });
+          }
+          git(receiver, ["remote", "set-url", "origin", `file://${root}/unavailable-promisor`]);
+          const missing = runCommand("git", ["cat-file", "-e", missingBlob], {
+            cwd: receiver,
+            env: { ...env, GIT_NO_LAZY_FETCH: "1" },
+          });
+          expect(missing.status, failureDetail(missing)).not.toBe(0);
+          expect(git(receiver, ["rev-parse", "--is-shallow-repository"])).toBe("false");
+          expect(git(receiver, ["rev-parse", "refs/remotes/origin/main"])).toBe(base);
+        };
+        const importedPartial = receive("prepared-partial", candidate, {
+          prepareReceiver: preparePartialReceiver,
+        });
+        expect(importedPartial.result.status, failureDetail(importedPartial.result)).toBe(0);
+        expect(importedPartial.result.stdout).toBe("transport fixture reached\n");
+        expect(git(importedPartial.receiver, ["rev-parse", "HEAD^"])).toBe(base);
+        expect(git(importedPartial.receiver, ["rev-parse", "refs/remotes/origin/main"])).toBe(base);
+        const importedBlob = runCommand("git", ["cat-file", "-e", missingBlob], {
+          cwd: importedPartial.receiver,
+          env: { ...env, GIT_NO_LAZY_FETCH: "1" },
+        });
+        expect(importedBlob.status, failureDetail(importedBlob)).toBe(0);
+        expectFileBytes(importedPartial.receiver, "unchanged.bin", unchanged);
+        git(importedPartial.receiver, ["fsck", "--connectivity-only", "--no-dangling"]);
+
+        for (const condition of ["missing", "mismatched"] as const) {
+          const rejected = receive(`prepared-partial-${condition}`, candidate, {
+            source: path.join(root, "unavailable-canonical"),
+            prepareReceiver: (receiver) => {
+              preparePartialReceiver(receiver);
+              if (condition === "missing") {
+                git(receiver, ["update-ref", "-d", "refs/remotes/origin/main"]);
+              } else {
+                git(receiver, ["update-ref", "refs/remotes/origin/main", `${base}^`]);
+              }
+            },
+          });
+          expect(rejected.result.status, failureDetail(rejected.result)).toBe(2);
+          expect(rejected.result.stdout).not.toContain("transport fixture reached");
+          expect(
+            readdirSync(rejected.receiver).filter((file) => file.startsWith(".openclaw-source-")),
+          ).toEqual([]);
+        }
+        return;
+      }
+
       const newerFiles = [
         "newer-source.txt",
         "newer-source-link",
@@ -5974,7 +6035,7 @@ cp.spawnSync = (command, args, options) => {
       git(["update-ref", "refs/remotes/origin/main", git(["rev-parse", "HEAD"])]);
       const wrapper = path.join(producer, ".tmp", "crabbox-wrapper.mjs");
       mkdirSync(path.dirname(wrapper));
-      copyRealWrapper(wrapper);
+      copyBundledScript(wrapper);
       const result = spawnSync(
         process.execPath,
         [wrapper, "run", "--provider", "aws", "--target", "linux", "--", "pnpm", "check:changed"],
@@ -6368,7 +6429,7 @@ cp.spawnSync = (command, args, options) => {
       const syncRoot = path.join(root, "sync");
       const fixtureWrapper = path.join(producer, ".tmp", "crabbox-wrapper.mjs");
       mkdirSync(path.dirname(fixtureWrapper), { recursive: true });
-      copyRealWrapper(fixtureWrapper);
+      copyBundledScript(fixtureWrapper);
       const env = {
         ...sourceFixtureEnv(path.join(root, "home"), syncRoot),
         XDG_STATE_HOME: path.join(root, "home", ".local", "state"),

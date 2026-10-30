@@ -1,5 +1,6 @@
 /** Type contracts for plugin-contributed embedding providers. */
 import type { MemorySearchDeadlineControlOptions } from "../../packages/memory-host-sdk/src/host/search-deadline-control.js";
+import type { AcquireConfiguredProviderLocalService } from "../agents/provider-local-service-target.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { SecretInput } from "../config/types.secrets.js";
 import type { EmbeddingProviderBatchRuntime } from "./embedding-provider-runtime-types.js";
@@ -26,6 +27,8 @@ export type EmbeddingProviderCallOptions = {
   inputType?: "query" | "document" | "semantic" | "classification" | "clustering";
   /** The host applied an explicit query instruction; skip provider query templates. */
   queryInstructionApplied?: boolean;
+  /** The host applied an explicit document format; skip provider document templates. */
+  documentFormatApplied?: boolean;
   /** Report each successful upstream request before resolving; undefined means usage unavailable. */
   onUsage?: (usage: EmbeddingUsage | undefined) => void;
 } & MemorySearchDeadlineControlOptions;
@@ -34,7 +37,7 @@ export type EmbeddingProviderCallOptions = {
 export type EmbeddingProviderRuntime = {
   id: string;
   cacheKeyData?: Record<string, unknown>;
-  /** Prior persisted model/cache identities that are equivalent to the current identity. */
+  /** Equivalent prior identities; alias cache reads require matching published index metadata. */
   indexIdentityAliases?: Array<{
     model: string;
     cacheKeyData: Record<string, unknown>;
@@ -73,6 +76,8 @@ export type EmbeddingProvider = {
 export type EmbeddingProviderCreateOptions = {
   config: OpenClawConfig;
   agentDir?: string;
+  /** Host-injected acquisition of the configured provider's local service. */
+  acquireLocalService?: AcquireConfiguredProviderLocalService;
   provider?: string;
   remote?: {
     baseUrl?: string;

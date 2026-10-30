@@ -1,25 +1,45 @@
 /**
- * Actor receipt capture + native MessageChannel delivery, with synthetic Team-shaped
- * 32 KiB skills metadata and an 8.8 KiB append. No database or live Gateway is used.
+ * Worker receipt capture + host delivery, restoration, and entry freezing, with
+ * synthetic Team-shaped 32 KiB skills metadata and an 8.8 KiB append.
+ * --phase patch measures an unchanged bookkeeping patch with no transcript delta;
+ * its base arm matches the protocol before unchanged patch entry reuse.
+ * --phase patch-changed measures an activity update against the exact preimage;
+ * its base arm matches full changed-entry receipts, candidate uses field deltas.
+ * --phase append-changed measures the same activity change during a transcript
+ * append; its base arm matches the full changed-entry append receipt protocol.
+ * --phase adoptRun|completeTurn|deliverySettled measures changed
+ * lifecycle receipts; base matches their full-entry protocol, candidate uses the
+ * existing field-delta protocol. Report bytes/reply by phase; multiply by an
+ * explicitly stated synthetic calls/minute, not an inferred production rate.
+ * --fixture <file> replays a V8-serialized synthetic {before, outcome} captured
+ * at the actor worker boundary, including its metadata publication receipts.
  * node --import ./scripts/tsx.mjs scripts/perf/session-actor-receipt-measure.ts \
  *   --arm base --mode timing
  * Repeat with --arm candidate, alternating AB/BA order for at least two pairs
  * (prefer five samples per arm). Run the same order separately with --mode allocation;
  * the inspector includes objects collected by minor and major GC. Timing and GC
  * conclusions use only timing passes. Each invocation measures 5,000 operations.
- * Both arms use production receipt capture (serialize + structuredClone), then a
- * real MessagePort crossing; the candidate also restores its detached entry.
- * CPU includes sender and receiver in this isolate, not whole-Gateway throughput.
+ * A real Worker performs production receipt capture (serialize + structuredClone)
+ * and sends bounded batches of 32 receipts. CPU, allocation, and GC are measured
+ * only in the receiving main isolate; sender thread CPU is reported separately.
+ * Host work includes deserialization, production restoration, and the replica's
+ * entry-freezing helper, but excludes SQL, admission, publication, and the rest of
+ * replica settlement. This owner benchmark does not replace Gateway load proof.
  */
 import assert from "node:assert/strict";
-import { Session, type HeapProfiler } from "node:inspector/promises";
+import { readFileSync } from "node:fs";
+import { Session } from "node:inspector/promises";
 import { loadavg } from "node:os";
 import { PerformanceObserver } from "node:perf_hooks";
 import { setImmediate } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { serialize } from "node:v8";
-import { MessageChannel, receiveMessageOnPort } from "node:worker_threads";
-import type { SessionActorHotState } from "../../src/config/sessions/session-actor-contract.js";
+import { deserialize, serialize } from "node:v8";
+import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
+import type {
+  SessionActorHotState,
+  SessionActorPhase,
+  SessionActorPhaseResults,
+} from "../../src/config/sessions/session-actor-contract.js";
 import {
   createSessionActorCommittedOutcome,
   projectSessionActorCommittedOutcome,
@@ -27,20 +47,40 @@ import {
   type SessionActorCommittedWireOutcome,
 } from "../../src/config/sessions/session-actor-receipt.js";
 import { captureSqliteWorkerCommitReceipt } from "../../src/infra/sqlite-worker-operation-settlement.js";
+import { freezeTrustedJsonSnapshot } from "../../src/shared/immutable-data.js";
+import { sumSampledHeapBytes } from "../lib/heap-sampling.ts";
 
 const { values } = parseArgs({
   options: {
     arm: { type: "string" },
     mode: { type: "string", default: "timing" },
+    phase: { type: "string", default: "append" },
     iterations: { type: "string", default: "5000" },
+    fixture: { type: "string" },
   },
 });
-assert(values.arm === "base" || values.arm === "candidate", "Choose --arm base or candidate");
+const arm: unknown = isMainThread ? values.arm : workerData.arm;
+const phase: unknown = isMainThread ? values.phase : workerData.phase;
+assert(
+  phase === "append" ||
+    phase === "append-changed" ||
+    phase === "patch" ||
+    phase === "patch-changed" ||
+    phase === "adoptRun" ||
+    phase === "completeTurn" ||
+    phase === "deliverySettled",
+);
+assert(arm === "base" || arm === "candidate", "Choose --arm base or candidate");
 assert(values.mode === "timing" || values.mode === "allocation");
 const iterations = Number(values.iterations);
 assert(Number.isSafeInteger(iterations) && iterations > 0);
 
-const before: SessionActorHotState = {
+const fixturePath = isMainThread ? values.fixture : workerData.fixture;
+// The optional fixture is generated by the synthetic actor boundary workload.
+const fixture: { before: SessionActorHotState; outcome: CommittedOutcome } | undefined = fixturePath
+  ? deserialize(readFileSync(fixturePath))
+  : undefined;
+const before: SessionActorHotState = fixture?.before ?? {
   target: {
     sessionKey: "agent:main:synthetic-receipt-measure",
     database: {
@@ -74,7 +114,7 @@ const before: SessionActorHotState = {
     modelContext: { kind: "unavailable", reason: "projection", generation: "synthetic-generation" },
   },
 };
-const after: SessionActorHotState = {
+const appended: SessionActorHotState = {
   ...before,
   version: { ...before.version, sequence: 1001 },
   writeToken: "synthetic-entry-revision-1001",
@@ -84,6 +124,13 @@ const after: SessionActorHotState = {
     watermark: { ...before.transcript.watermark, maxSeq: 1001 },
   },
 };
+const isAppend = phase === "append" || phase === "append-changed";
+const lifecycle = phase === "adoptRun" || phase === "completeTurn" || phase === "deliverySettled";
+const changed = phase === "patch-changed" || phase === "append-changed" || lifecycle;
+const after = isAppend ? appended : { ...appended, transcript: before.transcript };
+if (changed) {
+  after.entry = { ...structuredClone(before.entry!), updatedAt: 2 };
+}
 const sharedBuffer = new ArrayBuffer(64);
 const event = {
   type: "message",
@@ -94,110 +141,168 @@ const event = {
   secondView: new Uint8Array(sharedBuffer, 16, 32),
 };
 event.firstView[16] = 42;
-const outcome = createSessionActorCommittedOutcome({
-  phase: "appendTranscriptEvent",
-  command: { commandId: "synthetic-append", phaseId: "synthetic-turn" },
-  before,
-  after,
-  payloads: new Map([[1001, { event, serializedBytes: serialize(event).byteLength }]]),
-  applied: { value: { projectionNeedsReconcile: false }, reducers: [] },
-});
-type WireOutcome = SessionActorCommittedWireOutcome<typeof outcome.value>;
-const { port1, port2 } = new MessageChannel();
-function send(arm: "base" | "candidate") {
-  const wire = arm === "base" ? outcome : projectSessionActorCommittedOutcome(outcome, before);
-  const captured = captureSqliteWorkerCommitReceipt(wire);
-  assert(captured.kind === "inline", "Fixture must exercise the ordinary inline receipt");
-  port1.postMessage(captured.facts);
-  const received = receiveMessageOnPort(port2);
-  assert(received);
-  const result: WireOutcome = received.message;
-  return arm === "base" ? result : restoreSessionActorCommittedOutcome(result, before);
+const outcome =
+  fixture?.outcome ??
+  createSessionActorCommittedOutcome({
+    phase: isAppend ? "appendTranscriptEvent" : lifecycle ? phase : "patch",
+    command: { commandId: "synthetic-append", phaseId: "synthetic-turn" },
+    before,
+    after,
+    payloads: new Map([[1001, { event, serializedBytes: serialize(event).byteLength }]]),
+    applied: {
+      value: isAppend
+        ? { projectionNeedsReconcile: false }
+        : phase === "completeTurn"
+          ? { kind: "bookkeeping" }
+          : phase === "deliverySettled"
+            ? { disposition: "cleared" }
+            : undefined,
+      reducers: [],
+    },
+  });
+type WireOutcome = SessionActorCommittedWireOutcome<SessionActorPhaseResults[SessionActorPhase]>;
+// The fixture stores the committed outcome before wire projection.
+type CommittedOutcome = Parameters<
+  typeof projectSessionActorCommittedOutcome<SessionActorPhaseResults[SessionActorPhase]>
+>[0];
+type BatchComplete = { kind: "batch-complete"; senderCpuMs: number };
+if (!isMainThread) {
+  assert(parentPort);
+  parentPort.on("message", (count: number) => {
+    const cpuStart = process.threadCpuUsage();
+    for (let index = 0; index < count; index++) {
+      const wire = arm === "base" ? outcome : projectSessionActorCommittedOutcome(outcome, before);
+      const captured = captureSqliteWorkerCommitReceipt(wire);
+      assert(captured.kind === "inline", "Fixture must exercise the ordinary inline receipt");
+      parentPort!.postMessage(captured.facts, []);
+    }
+    const cpu = process.threadCpuUsage(cpuStart);
+    parentPort!.postMessage(
+      {
+        kind: "batch-complete",
+        senderCpuMs: (cpu.user + cpu.system) / 1000,
+      } satisfies BatchComplete,
+      [],
+    );
+  });
+} else {
+  await measure();
 }
-function allocated(node: HeapProfiler.SamplingHeapProfileNode): number {
-  return node.selfSize + node.children.reduce((sum, child) => sum + allocated(child), 0);
-}
-const inspector = new Session();
-const collections: Array<{ start: number; duration: number }> = [];
-const observer = new PerformanceObserver((list) => {
-  for (const entry of list.getEntries()) {
-    collections.push({ start: entry.startTime, duration: entry.duration });
-  }
-});
-try {
-  const projected = projectSessionActorCommittedOutcome(outcome, before);
-  assert.equal(projected.receipt.entryReference, before.writeToken);
-  assert.equal(projected.receipt.postimage.entry, undefined);
-  const baseline = send("base");
-  const candidate = send("candidate");
-  assert.deepEqual(candidate, baseline);
-  assert.deepEqual(candidate, outcome);
-  assert.notEqual(candidate.receipt.postimage.entry, before.entry);
-  assert.notEqual(candidate.receipt.postimage.entry?.skillsSnapshot, before.entry?.skillsSnapshot);
-  // The fixture owns this event shape; the check includes aliasing, not just equal bytes.
-  const delivered = candidate.receipt.transcript.appendedEvents?.[0]?.event as typeof event;
-  assert.equal(delivered.firstView.buffer, delivered.secondView.buffer);
-  assert.notEqual(delivered.firstView.buffer, sharedBuffer);
-  assert.equal(delivered.secondView[0], 42);
 
-  for (let index = 0; index < 1000; index++) {
-    send(values.arm);
+async function measure() {
+  freezeTrustedJsonSnapshot(before.entry);
+  const sender = new Worker(new URL(import.meta.url), {
+    workerData: { arm, phase, fixture: fixturePath },
+  });
+  let senderCpuMs = 0;
+  let last: WireOutcome | undefined;
+  async function receive(count: number) {
+    for (let offset = 0; offset < count; offset += 32) {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => {
+          sender.off("message", onMessage);
+          reject(error);
+        };
+        const onMessage = (message: WireOutcome | BatchComplete) => {
+          if (message.kind === "batch-complete") {
+            senderCpuMs += message.senderCpuMs;
+            sender.off("message", onMessage);
+            sender.off("error", onError);
+            resolve();
+          } else {
+            last = arm === "base" ? message : restoreSessionActorCommittedOutcome(message, before);
+            freezeTrustedJsonSnapshot(last.receipt.postimage.entry);
+          }
+        };
+        sender.on("message", onMessage);
+        sender.once("error", onError);
+        sender.postMessage(Math.min(32, count - offset), []);
+      });
+    }
   }
-  await setImmediate();
-  if (values.mode === "allocation") {
-    inspector.connect();
-    await inspector.post("HeapProfiler.startSampling", {
-      samplingInterval: 1024,
-      includeObjectsCollectedByMajorGC: true,
-      includeObjectsCollectedByMinorGC: true,
-    });
+  const inspector = new Session();
+  const collections: Array<{ start: number; duration: number }> = [];
+  const observer = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      collections.push({ start: entry.startTime, duration: entry.duration });
+    }
+  });
+  try {
+    await receive(1);
+    assert(last);
+    assert.deepEqual(last, outcome);
+    if (arm === "candidate") {
+      if (!changed) {
+        assert.equal(last.receipt.postimage.entry, before.entry);
+      }
+      assert.equal(last.receipt.postimage.entry?.skillsSnapshot, before.entry?.skillsSnapshot);
+    } else {
+      assert.notEqual(last.receipt.postimage.entry, before.entry);
+    }
+    // The fixture owns this event shape; the check includes aliasing, not just equal bytes.
+    if (isAppend && !fixture) {
+      const delivered = last.receipt.transcript.appendedEvents?.[0]?.event as typeof event;
+      assert.equal(delivered.firstView.buffer, delivered.secondView.buffer);
+      assert.notEqual(delivered.firstView.buffer, sharedBuffer);
+      assert.equal(delivered.secondView[0], 42);
+    }
+
+    await receive(1000);
+    await setImmediate();
+    if (values.mode === "allocation") {
+      inspector.connect();
+      await inspector.post("HeapProfiler.startSampling", {
+        samplingInterval: 1024,
+        includeObjectsCollectedByMajorGC: true,
+        includeObjectsCollectedByMinorGC: true,
+      });
+    }
+    observer.observe({ entryTypes: ["gc"] });
+    const hostLoadBefore = loadavg();
+    const memoryBefore = process.memoryUsage();
+    const cpuStart = process.threadCpuUsage();
+    senderCpuMs = 0;
+    const start = performance.now();
+    await receive(iterations);
+    const end = performance.now();
+    const cpu = process.threadCpuUsage(cpuStart);
+    const memoryAfter = process.memoryUsage();
+    const hostLoadAfter = loadavg();
+    await setImmediate();
+    await setImmediate();
+    const sampled =
+      values.mode === "allocation" ? await inspector.post("HeapProfiler.stopSampling") : undefined;
+    const pauses = collections.filter(({ start: at }) => at >= start && at < end);
+    const wire = arm === "base" ? outcome : projectSessionActorCommittedOutcome(outcome, before);
+    const allocatedBytes = sampled ? sumSampledHeapBytes(sampled.profile.head) : undefined;
+    console.log(
+      JSON.stringify({
+        arm,
+        mode: values.mode,
+        iterations,
+        fixture: fixturePath ? "captured-synthetic-actor-receipt" : "32k-entry",
+        phase,
+        serializedBytesPerOperation: serialize(wire).byteLength,
+        elapsedMs: end - start,
+        mainThreadCpuMs: (cpu.user + cpu.system) / 1000,
+        senderThreadCpuMs: senderCpuMs,
+        sampledAllocatedBytes: allocatedBytes,
+        sampledAllocatedBytesPerOperation:
+          allocatedBytes === undefined ? undefined : allocatedBytes / iterations,
+        gc: {
+          count: pauses.length,
+          totalMs: pauses.reduce((sum, pause) => sum + pause.duration, 0),
+          maxMs: Math.max(0, ...pauses.map((pause) => pause.duration)),
+        },
+        hostLoadBefore,
+        hostLoadAfter,
+        memoryBefore,
+        memoryAfter,
+      }),
+    );
+  } finally {
+    observer.disconnect();
+    inspector.disconnect();
+    await sender.terminate();
   }
-  observer.observe({ entryTypes: ["gc"] });
-  const hostLoadBefore = loadavg();
-  const memoryBefore = process.memoryUsage();
-  const cpuStart = process.threadCpuUsage();
-  const start = performance.now();
-  for (let index = 0; index < iterations; index++) {
-    send(values.arm);
-  }
-  const end = performance.now();
-  const cpu = process.threadCpuUsage(cpuStart);
-  const memoryAfter = process.memoryUsage();
-  const hostLoadAfter = loadavg();
-  await setImmediate();
-  await setImmediate();
-  const sampled =
-    values.mode === "allocation" ? await inspector.post("HeapProfiler.stopSampling") : undefined;
-  const pauses = collections.filter(({ start: at }) => at >= start && at < end);
-  const wire =
-    values.arm === "base" ? outcome : projectSessionActorCommittedOutcome(outcome, before);
-  const allocatedBytes = sampled ? allocated(sampled.profile.head) : undefined;
-  console.log(
-    JSON.stringify({
-      arm: values.arm,
-      mode: values.mode,
-      iterations,
-      fixture: "32k-entry-8.8k-append",
-      serializedBytesPerOperation: serialize(wire).byteLength,
-      elapsedMs: end - start,
-      mainThreadCpuMs: (cpu.user + cpu.system) / 1000,
-      sampledAllocatedBytes: allocatedBytes,
-      sampledAllocatedBytesPerOperation:
-        allocatedBytes === undefined ? undefined : allocatedBytes / iterations,
-      gc: {
-        count: pauses.length,
-        totalMs: pauses.reduce((sum, pause) => sum + pause.duration, 0),
-        maxMs: Math.max(0, ...pauses.map((pause) => pause.duration)),
-      },
-      hostLoadBefore,
-      hostLoadAfter,
-      memoryBefore,
-      memoryAfter,
-    }),
-  );
-} finally {
-  observer.disconnect();
-  inspector.disconnect();
-  port1.close();
-  port2.close();
 }

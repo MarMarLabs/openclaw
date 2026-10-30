@@ -306,6 +306,43 @@ it.each(["unresolved import", "blocked output"])(
   },
 );
 
+it("keeps the WebKit text-size lock that stops iPhone Safari from boosting small text", async () => {
+  await writeRoot("lazy.css", "html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }");
+
+  const { names } = await buildOutput(createConfig());
+
+  const styles = (await readAssets(names, ".css")).map(({ source }) => source).join("\n");
+  expect(styles).toContain("-webkit-text-size-adjust:100%");
+});
+
+it("finalizes raw browser-fixture assets when precompression is omitted", async () => {
+  const config = createConfig();
+  await writeRoot(
+    "main.js",
+    'import catalog from "virtual:openclaw-control-ui-locale/fr"; globalThis.catalog = catalog;',
+  );
+  config.plugins = config.plugins?.filter(
+    (plugin) => !(plugin && "name" in plugin && plugin.name === "control-ui-precompressed-assets"),
+  );
+
+  const { names, html, worker } = await buildOutput(config);
+
+  expect(names.some((name) => name.endsWith(".br") || name.endsWith(".gz"))).toBe(false);
+  const entry = names.find((name) => /^index-.*\.js$/u.test(name));
+  expect(entry).toBeDefined();
+  expect(html).toContain(entry);
+  const identity = readBuiltIdentity(html);
+  expect(worker).toContain(`const EMBEDDED_CACHE_VERSION = "${identity.buildId}";`);
+  expect(offlineAssets(worker)).toContain(`assets/${entry}`);
+  expect(JSON.parse(await readOutput(".build-inputs.json"))).toEqual(
+    expect.arrayContaining([
+      "src/config/schema.hints.ts",
+      "src/gateway/control-ui-csp.ts",
+      "ui/src/app-route-paths.ts",
+    ]),
+  );
+});
+
 it("reports completed compression work before build completion at a bounded cadence", async () => {
   const config = createConfig("info");
   let clockMs = 0;

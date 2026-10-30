@@ -8,7 +8,12 @@ import { createDeferredCore } from "../shared/deferred.js";
 import { copyOwnedBuffer } from "../shared/owned-buffer.js";
 import { hasChildProcessExited, releaseChildProcessOutputAfterExit } from "./child-process.js";
 import { resolveMaxOutputBytes, type CommandOutputStream } from "./exec-output.js";
-import { createSanitizedCommandError } from "./exec-result.js";
+import {
+  CommandProcessCleanupError,
+  createSanitizedCommandError,
+  hasCommandProcessCleanupError,
+  readCommandProcessFailure,
+} from "./exec-result.js";
 import { runCommandWithTimeout } from "./exec-runner.js";
 import {
   COMMAND_PROCESS_TREE_KILL_GRACE_MS,
@@ -252,6 +257,7 @@ export async function runExec(
 
 export type BufferedCommandOptions = {
   timeoutMs?: number;
+  noOutputTimeoutMs?: number;
   cwd?: string;
   input?: string | Uint8Array;
   baseEnv?: NodeJS.ProcessEnv;
@@ -272,7 +278,7 @@ export type BufferedCommandResult = {
   code: number | null;
   signal: NodeJS.Signals | null;
   killed: boolean;
-  termination: "exit" | "timeout" | "signal" | "output-limit" | "error";
+  termination: "exit" | "timeout" | "no-output-timeout" | "signal" | "output-limit" | "error";
   outputLimitStream?: CommandOutputStream;
   errorStream?: CommandOutputStream;
   error?: Error;
@@ -341,6 +347,7 @@ export async function runCommandBuffered(
       outputCapture: "discard",
       signal: options.signal,
       timeoutMs: options.timeoutMs,
+      noOutputTimeoutMs: options.noOutputTimeoutMs,
       tolerateOutputError: {
         stdout: options.discardOutput?.stdout || options.tolerateOutputError?.stdout,
         stderr: options.discardOutput?.stderr || options.tolerateOutputError?.stderr,
@@ -349,9 +356,7 @@ export async function runCommandBuffered(
     });
     const termination: BufferedCommandResult["termination"] = result.outputLimitExceeded
       ? "output-limit"
-      : result.termination === "no-output-timeout"
-        ? "timeout"
-        : result.termination;
+      : result.termination;
     return {
       stdout: capturedOutput("stdout"),
       stderr: capturedOutput("stderr"),
@@ -361,6 +366,7 @@ export async function runCommandBuffered(
       termination,
       ...(outputLimitStream ? { outputLimitStream } : {}),
       ...(result.outputErrorStream ? { errorStream: result.outputErrorStream } : {}),
+      ...(result.cleanup === "uncertain" ? { error: new CommandProcessCleanupError() } : {}),
     };
   } catch (error) {
     const commandError = error instanceof Error ? error : new Error("Command execution failed");
@@ -380,7 +386,11 @@ export async function runCommandBuffered(
       killed: false,
       termination: "error",
       ...(errorStream ? { errorStream } : {}),
-      error: commandError,
+      error:
+        readCommandProcessFailure(commandError)?.cleanup === "uncertain" &&
+        !hasCommandProcessCleanupError(commandError)
+          ? new CommandProcessCleanupError({ cause: commandError })
+          : commandError,
     };
   }
 }
