@@ -26,6 +26,7 @@ import { createDeferredCore } from "../shared/deferred.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db-cache.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import * as stateWriter from "../state/openclaw-state-worker-store.js";
 import { createVisitorAccessPluginConfig } from "../test-utils/visitor-access-config.test-support.js";
 import { resetPluginBlobStoreForTests } from "./plugin-blob-store.js";
 import { stateTest } from "./plugin-state-fixtures.test-support.js";
@@ -643,6 +644,41 @@ describe("plugin-state-store.runtime", () => {
       }
     },
   );
+
+  it("refuses an occupied claim whose owner retires while an earlier write settles", async ({
+    state: _state,
+  }) => {
+    const { record, registry, runtime } = setup("state-owner", "config", true);
+    const store = runtime.openKeyedStoreV2<number>(keyedOptions);
+    const canonical = createPluginStateKeyedStore<number>("state-owner", keyedOptions);
+    expect(await store.registerIfAbsent("claim", 1)).toBe(true);
+    expect(await store.lookup("claim")).toBe(1);
+    const writes = vi.spyOn(stateWriter, "runOpenClawStateWorkerOperation");
+    try {
+      // While the owner is active, an occupied claim is answered without a writer request.
+      expect(await store.registerIfAbsent("claim", 2)).toBe(false);
+      expect(writes).not.toHaveBeenCalled();
+
+      const earlier = canonical.register("other", 3);
+      const claim = store.registerIfAbsent("claim", 4);
+      revokePluginRecord(registry.registry, record);
+      await earlier;
+      const outcome = await claim.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      expect(outcome).toMatchObject({
+        error: { cause: { code: "PLUGIN_STATE_RUNTIME_INACTIVE" } },
+      });
+      expect(
+        isPluginStateRuntimeInactiveError("error" in outcome ? outcome.error : undefined),
+      ).toBe(true);
+    } finally {
+      writes.mockRestore();
+    }
+    expect(await canonical.lookup("claim")).toBe(1);
+    expect(await canonical.lookup("other")).toBe(3);
+  });
 
   it("fences retained operations and range reads when the owning plugin closes", async ({
     state: _state,
