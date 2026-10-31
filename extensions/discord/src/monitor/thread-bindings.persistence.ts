@@ -3,6 +3,7 @@ import {
   createPluginStateErrorReporter,
   isPluginStateRuntimeInactiveError,
 } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { isStateDatabaseAdmissionClosedError } from "openclaw/plugin-sdk/retry-runtime";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { asOptionalObjectRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -153,11 +154,12 @@ export async function commitBindingRecord(params: {
           failure = interruption;
         }
       }
-      const runtimeInactive = isPluginStateRuntimeInactiveError(error);
-      if (runtimeInactive && !authorityRefused && !targetCommitted) {
+      const admissionRefused =
+        isPluginStateRuntimeInactiveError(error) || isStateDatabaseAdmissionClosedError(error);
+      if (admissionRefused && !authorityRefused && !targetCommitted) {
         throw error;
       }
-      if (authorityRefused || runtimeInactive) {
+      if (authorityRefused || admissionRefused) {
         createPluginStateErrorReporter(
           getDiscordRuntime,
           "discord",

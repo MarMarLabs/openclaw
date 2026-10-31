@@ -14,6 +14,7 @@ import {
 } from "openclaw/plugin-sdk/session-store-runtime";
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { readGlobalSingleton } from "../shared/global-singleton.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { loadBundledPluginFacade } from "../test-utils/bundled-plugin-public-surface.js";
@@ -22,6 +23,7 @@ import {
   detachPluginConversationBinding,
   requestPluginConversationBinding,
 } from "./conversation-binding.js";
+import { LegacyPluginSdkResourceHost } from "./legacy-sdk-resource-host.js";
 import { createPluginCache, retirePluginCache, withPluginCache } from "./plugin-cache.js";
 import { bindPluginInstanceModuleLoader } from "./plugin-instance-module-loader.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
@@ -190,6 +192,26 @@ async function setup(persist = true) {
 }
 
 describe("Discord binding runtime ownership", () => {
+  it("keeps bindings and persistence when shared-state close admission refuses unbind", async () => {
+    const { owner, manager, stored, snapshot } = await setup();
+    const original = manager.getByThreadId("thread-1");
+    const host = new LegacyPluginSdkResourceHost();
+    const scheduler = new GatewayScheduler();
+    host.bindScheduler(scheduler);
+    try {
+      scheduler.beginClose();
+      await expect(
+        host.run(() => owner.instance.run(() => manager.unbindThread({ threadId: "thread-1" }))),
+      ).rejects.toMatchObject({ code: "STATE_DATABASE_READ_ADMISSION_INVALIDATED" });
+      expect(manager.getByThreadId("thread-1")).toBe(original);
+      expect(persistenceAvailable()).toBe(true);
+    } finally {
+      await host.close();
+      await scheduler.stop();
+    }
+    expect(await stored()).toEqual(snapshot);
+  });
+
   it("refuses retired touches with a bound operation source without disabling persistence", async () => {
     const { state, foreign, owner, manager, stored, snapshot } = await setup();
     await state.writeJson("operation-source/package.json", { name: "discord", type: "module" });
