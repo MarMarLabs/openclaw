@@ -432,8 +432,15 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
 
         const visibleRequests = () =>
           fixture.requests.filter((request) => request.path.startsWith(MESSAGE_PATH));
+        // The transport retries a lost response in place under one UUID, which Feishu
+        // deduplicates, so every request here is the same message.
+        const messageUuids = () =>
+          new Set(
+            visibleRequests().map((request) => (JSON.parse(request.body) as { uuid: string }).uuid),
+          );
         expect(outcome.status).toBe("failed");
-        expect(visibleRequests()).toHaveLength(1);
+        expect(visibleRequests()).toHaveLength(3);
+        expect([...messageUuids()]).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/)]);
         const row = readDeliveryQueueRow(stateDir, deliveryIntentId);
         expect(row).toMatchObject({ status: "pending", recovery_state: "unknown_after_send" });
         expect(row?.platform_send_started_at).toEqual(expect.any(Number));
@@ -446,7 +453,8 @@ describe("Feishu outbound fanout authority over the Lark transport", () => {
           selectEntry: (entry) => ({ match: entry.channel === "feishu", bypassBackoff: true }),
         });
 
-        expect(visibleRequests()).toHaveLength(1);
+        expect(visibleRequests()).toHaveLength(3);
+        expect(messageUuids().size).toBe(1);
         expect(readDeliveryQueueRow(stateDir, deliveryIntentId)?.status).toBe("failed");
       });
     });

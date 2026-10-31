@@ -348,6 +348,7 @@ describe("createFeishuReplyDispatcher block table receipts", () => {
       data: {
         receive_id: "oc_chat",
         msg_type: "post",
+        uuid: expect.any(String),
         content: buildFeishuPostMessageContent({ messageText: tableMarkdown }),
       },
     });
